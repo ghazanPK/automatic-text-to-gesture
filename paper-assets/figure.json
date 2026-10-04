@@ -1,9 +1,11 @@
 {
-  "file": "method.png",
-  "kind": "original-paper-figure",
+  "file": "graphical-abstract.png",
+  "kind": "ai-generated-scientific-redraw",
   "source_pdf": "automatic-text-to-gesture.pdf",
   "page": 2,
   "figure": 1,
-  "alt": "Method diagram from Figure 1 of the automatic-text-to-gesture paper",
-  "caption": "Original method figure from the paper: Figure 1, PDF page 2. Extracted for this research introduction; the diagram describes the original system, not verification of this reimplementation."
+  "alt": "Graphical abstract: mining text–gesture rules from video and retrieving recorded motion for new text",
+  "caption": "Graphical abstract diagram. Video-derived rules map new text to recorded co-speech gestures.",
+  "original_figure": "method.png",
+  "generation_prompt": "generation-prompt.txt"
 }

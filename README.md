@@ -8,9 +8,9 @@
 
 > Automatically mined rules reduce manual co-speech gesture authoring.
 
-![Method diagram from Figure 1 of the automatic-text-to-gesture paper](paper-assets/method.png)
+![Graphical abstract: mining text–gesture rules from video and retrieving recorded motion for new text](paper-assets/graphical-abstract.png)
 
-*Original method figure from the paper: Figure 1, PDF page 2. Extracted for this research introduction; the diagram describes the original system, not verification of this reimplementation.*
+*Graphical abstract diagram. Video-derived rules map new text to recorded co-speech gestures.*
 
 ## Why this research
 
