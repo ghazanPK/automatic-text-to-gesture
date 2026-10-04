@@ -1,0 +1,9 @@
+{
+  "file": "method.png",
+  "kind": "original-paper-figure",
+  "source_pdf": "automatic-text-to-gesture.pdf",
+  "page": 2,
+  "figure": 1,
+  "alt": "Method diagram from Figure 1 of the automatic-text-to-gesture paper",
+  "caption": "Original method figure from the paper: Figure 1, PDF page 2. Extracted for this research introduction; the diagram describes the original system, not verification of this reimplementation."
+}

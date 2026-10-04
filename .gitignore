@@ -1,0 +1,13 @@
+data/
+outputs/
+*.npy
+*.npz
+*.pt
+*.pth
+__pycache__/
+.venv/
+*.egg-info/
+
+.pytest_cache/
+build/
+dist/

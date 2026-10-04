@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "automatic-text-to-gesture"
+version = "0.1.0"
+description = "Independent educational reimplementation of automatic text-to-gesture rule mining"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24"]
+
+[project.scripts]
+attg = "automatic_text_to_gesture.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+

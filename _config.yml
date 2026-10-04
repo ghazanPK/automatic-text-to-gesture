@@ -1,0 +1,17 @@
+title: "Automatic gesture rules"
+description: "Automatically mined rules reduce manual co-speech gesture authoring."
+markdown: kramdown
+kramdown:
+  input: GFM
+exclude:
+  - src
+  - tests
+  - .venv
+  - data
+  - runs
+  - outputs
+  - checkpoints
+  - pyproject.toml
+  - requirements.txt
+  - package.json
+  - package-lock.json

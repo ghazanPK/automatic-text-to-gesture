@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{ site.title | escape }}</title>
+<meta name="description" content="{{ site.description | escape }}">
+<style>
+:root{color-scheme:light;--ink:#182638;--accent:#176b85;--line:#dbe5eb}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:#f5f8fa;color:var(--ink);font:17px/1.7 system-ui,sans-serif}
+nav{background:#13283a;color:white;padding:14px max(24px,calc((100% - 1060px)/2));display:flex;gap:24px;flex-wrap:wrap;font-size:14px}
+nav a{color:#d6f0f4}main{max-width:1060px;margin:32px auto;padding:36px 48px;background:white;border:1px solid var(--line);border-radius:14px}
+h1{font-size:clamp(1.8rem,4vw,2.65rem);line-height:1.2;letter-spacing:-.025em}h2{margin-top:2.3rem;padding-top:1rem;border-top:1px solid var(--line);font-size:1.5rem}h3{margin-top:1.8rem;font-size:1.15rem}
+a{color:var(--accent);text-underline-offset:3px}img{max-width:100%;height:auto;border-radius:10px}blockquote{border-left:4px solid #7bbbc9;background:#eff7f9;margin:20px 0;padding:12px 20px}blockquote p{margin:0}
+table{border-collapse:collapse;width:100%;font-size:.94rem}th,td{padding:12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}th{background:#f0f5f8}td:first-child{min-width:125px;font-weight:600}
+pre{overflow:auto;padding:18px;background:#142638;color:#e5f3f8;border-radius:8px;font-size:.82rem;line-height:1.55}code{font-size:.87em}p code,li code{background:#edf2f6;padding:2px 5px;border-radius:4px}footer{padding:20px;text-align:center;font-size:13px;color:#56677a}
+@media(max-width:650px){main{margin:12px;padding:20px;border-radius:8px}body{font-size:16px}table{display:block;overflow:auto}nav{padding:12px 20px}}
+</style></head><body>
+<nav><a href="https://ghazanfarali.com">Ghazanfar Ali · Research</a><a href="#implementation-and-usage">Code &amp; setup</a>{% if site.github.repository_url %}<a href="{{ site.github.repository_url }}">GitHub repository</a>{% endif %}</nav>
+<main>{{ content }}</main><footer>Paper introduction and independent research implementation.</footer>
+</body></html>
