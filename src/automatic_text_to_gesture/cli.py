@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse, json
 from pathlib import Path
 import numpy as np
-from .core import load_glove, mine_rules, read_rules, retrieve, write_rules
+from .core import TOKEN, load_glove, mine_rules, read_rules, retrieve, write_rules
 
 
 def main() -> None:
@@ -29,7 +29,10 @@ def main() -> None:
         rules = mine_rules(video["pose"], words, {k: bank_file[k] for k in bank_file.files}, args.threshold, args.seed, Path(args.video).stem)
         write_rules(args.output, rules)
     else:
-        result = retrieve(args.text, read_rules(args.rules), load_glove(args.glove), args.audio_seconds)
+        rules = read_rules(args.rules)
+        words = {w for r in rules for w in TOKEN.findall(r.phrase.lower())}
+        words.update(TOKEN.findall(args.text.lower()))
+        result = retrieve(args.text, rules, load_glove(args.glove, words), args.audio_seconds)
         output=Path(args.output); output.parent.mkdir(parents=True,exist_ok=True); output.write_text(json.dumps(result, indent=2), encoding="utf-8")
 
 

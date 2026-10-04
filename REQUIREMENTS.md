@@ -18,5 +18,9 @@
 
 ## Acceptance criteria
 
-`mine` writes a JSONL rule map with provenance and score; `retrieve` writes ordered gesture slots and timing; malformed shapes and timestamps fail clearly; the included smoke test covers normalization, threshold mining, and semantic retrieval.
+`mine` writes a JSONL rule map with provenance and score; `retrieve` writes ordered gesture slots and timing; malformed shapes and timestamps fail clearly; the included verification test covers normalization, threshold mining, and semantic retrieval.
 
+
+## Interactive data handoff
+
+The browser queries the existing retrieval implementation and renders the selected motion frames with a pinned local Three.js module. Its immediate example mode is author-created motion plus explicitly illustrative, untrained vectors. Production mode accepts the documented public BVH/timed-transcript preparation outputs, real local encoder assets and trained checkpoints as appropriate. The preparation adapter preserves motion/transcript alignment and declares skeleton/FPS assumptions; it does not fabricate annotations or evaluation results. Speech is optional and replaceable (Kokoro-82M English/faster-whisper small CPU INT8, with browser voice/typed-input alternatives). Verification must cover clip serialization and algorithm routing, with model quality evaluation deferred to user-prepared public data.

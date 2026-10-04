@@ -58,6 +58,14 @@ Please cite the research paper when using its ideas; [download the BibTeX citati
 
 Independent, clean educational implementation of the method in *Automatic text-to-gesture rule generation for embodied conversational agents* (Ali, Lee, and Hwang, 2020, CAVW, DOI: [10.1002/cav.1944](https://doi.org/10.1002/cav.1944)). This is not the institute source code and does not reproduce reported results by itself.
 
+Try the local browser demo after installation: `python scripts/prepare_viewer.py --out static/vendor`, then `python scripts/demo_server.py --example`. Open the printed URL. This mode uses author-created arm motion and transparent illustrative word vectors, labeled in the UI; it exercises the real mining and retrieval functions without claiming a trained model. The prepared-data commands below switch to actual GloVe and motion files.
+
+```bash
+python -m pip install -e .
+python scripts/prepare_viewer.py --out static/vendor
+python scripts/demo_server.py --example
+```
+
 The pipeline centers upper-body 2D poses at the neck, slides projected gesture-bank clips over a timed video pose stream, accepts frame-cosine matches at the paper's `0.92` threshold, and records up-to-five-word phrases. Runtime retrieval sums GloVe word vectors for each five-word chunk and selects the most similar stored phrase. An optional `source: manual` entry receives priority on an exact phrase match.
 
 ### Setup and public data
@@ -70,13 +78,13 @@ python -m pip install -e .
 
 On Windows PowerShell, activate with `.\.venv\Scripts\Activate.ps1` instead of the `source` line.
 
-Run the offline smoke workflow before preparing a dataset:
+Run the offline verification workflow before preparing a dataset:
 
 ```bash
-python scripts/smoke.py
+python scripts/verify.py
 ```
 
-It procedurally creates `outputs/smoke/video.npz`, `bank.npz`, and a 300-D GloVe-format fixture, then invokes the installed `mine` and `retrieve` CLI paths. Inspect `rules.jsonl` and `sequence.json` in that directory. Replace those generated files with real arrays using the contracts below; no code path changes are required.
+It procedurally creates `outputs/verification/video.npz`, `bank.npz`, and a 300-D GloVe-format fixture, then invokes the installed `mine` and `retrieve` CLI paths. Inspect `rules.jsonl` and `sequence.json` in that directory. Replace those generated files with real arrays using the contracts below; no code path changes are required.
 
 Prepare downloads yourself. Suitable public replacements are the [TED Gesture Dataset](https://github.com/youngwoo-yoon/Co-Speech_Gesture_Generation) for aligned talk pose/text and a redistributable animation library you have rights to use. Download `glove.6B.300d.txt` from the [GloVe project](https://nlp.stanford.edu/projects/glove/). ICT Virtual Human Toolkit animations referenced by the paper are not bundled; check their own access and license terms.
 
@@ -91,6 +99,36 @@ python -m pytest
 
 The rule file records phrase, gesture ID, similarity, frame interval, and source. Retrieval produces ordered gesture slots with semantic score and optional speech timing.
 
+### Prepare and view a motion result
+
+Use a BVH file you have permission to process and a JSONL transcript with either one `{"words":[{"word":"...","start_seconds":0.0,"end_seconds":0.3}]}` record or one word per line. The adapter applies BVH joint rotations, resamples at 15 FPS, centers on the neck, and projects orthographically to XY. It requires the joint names in `scripts/prepare_public_data.py`; retarget other skeletons to those names first. The bank uses consecutive three-second units from the same motion. This illustrates the mining interface; the paper used predefined 3D animations projected against independently estimated video pose.
+
+```bash
+python scripts/prepare_public_data.py --bvh data/licensed_motion.bvh --transcript data/words.jsonl --output-dir data/prepared
+attg mine --video data/prepared/video.npz --bank data/prepared/bank.npz --output outputs/rules.jsonl
+attg retrieve --rules outputs/rules.jsonl --glove data/glove.6B.300d.txt --text "move forward together" --audio-seconds 3 --output outputs/sequence.json
+python scripts/export_playback.py --sequence outputs/sequence.json --motion data/prepared/bank.npz --output outputs/playback.json
+```
+
+`playback.json` contains selected joint frames, timing and semantic scores. The included `scripts/verify.py` writes a separately labeled procedural verification fixture with illustrative motion and tiny word vectors. It is not a research result.
+
+Install the local 3D viewer dependency and run the live query demo:
+
+```bash
+python scripts/prepare_viewer.py --out static/vendor
+python scripts/demo_server.py --data-dir data/prepared --glove data/glove.6B.300d.txt
+```
+
+Open the printed local URL. The pose-cosine slider re-mines rules at the selected threshold; the trace shows selected gesture IDs and GloVe similarity while the viewer plays the corresponding recorded frames. [Wild pose matching](https://github.com/ghazanPK/wild-pose-matching) is a later research continuation of the automatic mining lineage, not a software dependency.
+
+For a Flow Human integration, export the optional portable rule map:
+
+```bash
+python scripts/export_flow_map.py --rules outputs/rules.jsonl --bank data/prepared/bank.npz --glove data/glove.6B.300d.txt --extra-words data/query-vocabulary.txt --output outputs/flow-rule-map.json
+```
+
+The JSON contract is `{"rules":[{"phrase":"...","gesture":"...","frames":[...],"fps":15}],"vectors":{"word":[...]}}`. `--extra-words` is optional, one anticipated query word per line; without it only words in rule phrases are exported. An omitted `--glove` leaves out vectors, allowing an importing app to use an explicitly identified lexical baseline. Motion frames come from the bank, not from generated animation.
+
 ### Scope and limitations
 
 This repository starts after pose estimation, word alignment, and gesture projection. It does not include videos, motion capture, GloVe, trained weights, Unity assets, or private counts/results. Cosine matching is sensitive to camera and skeleton conventions, GloVe sum pooling is intentionally the paper-era baseline, and retrieval can repeat or select weak semantic matches. Dataset and animation licenses remain separate from this MIT-licensed code.
@@ -102,3 +140,7 @@ Machine-readable metadata is in [citation.bib](citation.bib).
 ```bibtex
 @article{ali2020automatic, title={Automatic text-to-gesture rule generation for embodied conversational agents}, author={Ali, Ghazanfar and Lee, Myungho and Hwang, Jae-In}, journal={Computer Animation and Virtual Worlds}, volume={31}, number={4-5}, pages={e1944}, year={2020}, doi={10.1002/cav.1944}}
 ```
+
+### Optional local speech adapters
+
+The viewer can speak its query or transcribe user-selected audio. Browser voice and typed text work without model weights. Install `python -m pip install -e ".[speech]"` for local adapters. Obtain Kokoro files from [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) yourself: `config.json`, `kokoro-v1_0.pth` and `voices/af_heart.pt`. Set `KOKORO_MODEL_DIR` to their parent folder before launching the server. Follow [Kokoro's English phonemizer setup](https://github.com/hexgrad/kokoro), including espeak-ng where required, then choose Local Kokoro. For ASR, set `WHISPER_MODEL_DIR` to a user-downloaded [faster-whisper](https://github.com/SYSTRAN/faster-whisper) small model directory containing `model.bin` and its tokenizer/configuration files. ASR runs on CPU with INT8, requests word timestamps and VAD, and disables implicit model downloads. No speech model files or audio recordings are included in this repo.

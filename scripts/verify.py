@@ -12,7 +12,7 @@ import numpy as np
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output-dir", type=Path, default=Path("outputs/smoke"))
+    parser.add_argument("--output-dir", type=Path, default=Path("outputs/verification"))
     args = parser.parse_args()
     out = args.output_dir
     out.mkdir(parents=True, exist_ok=True)
@@ -43,7 +43,7 @@ def main() -> None:
     rules = [json.loads(line) for line in (out / "rules.jsonl").read_text(encoding="utf-8").splitlines() if line]
     sequence = json.loads((out / "sequence.json").read_text(encoding="utf-8"))
     if not rules or not sequence:
-        raise RuntimeError("CLI smoke workflow produced empty output")
+        raise RuntimeError("CLI verification workflow produced empty output")
     print(json.dumps({"rules": len(rules), "gestures": len(sequence), "output": str(out)}))
 
 

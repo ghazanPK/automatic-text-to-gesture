@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Automatic Text-to-Gesture · motion demo</title>
+<style>
+:root{font:16px/1.5 system-ui,sans-serif;color:#eaf2ff;background:#101827}*{box-sizing:border-box}
+body{margin:0 auto;max-width:1250px;padding:24px}header{display:flex;justify-content:space-between;align-items:flex-start;gap:20px}
+h1{margin:.1em 0;font-size:clamp(1.5rem,3vw,2.4rem)}p{color:#b4c4d8}a{color:#8bd9ff}
+.layout{display:grid;grid-template-columns:minmax(300px,1.4fr) minmax(280px,1fr);gap:20px}
+.card{border:1px solid #30445e;background:#172338;border-radius:16px;padding:18px}
+#stage{height:430px;border-radius:12px;overflow:hidden;background:#101827}
+label{display:block;font-weight:600;margin:12px 0 4px}input,select,button{font:inherit;border-radius:8px;padding:9px 12px}
+input,select{width:100%;color:#eaf2ff;background:#0f192b;border:1px solid #536b88}button{cursor:pointer;background:#59c4d8;border:0;color:#071827;font-weight:700}
+button.secondary{background:#334963;color:#eaf2ff}#status{min-height:2em;color:#9bd6b0}.controls{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
+table{border-collapse:collapse;width:100%;font-size:.9rem}th,td{padding:8px;border-bottom:1px solid #30445e;text-align:left;vertical-align:top}
+#trace{max-height:270px;overflow:auto}.small{font-size:.86rem;color:#a8b7c9}#scrub{width:100%}
+@media(max-width:820px){.layout{grid-template-columns:1fr}#stage{height:360px}header{display:block}}
+</style></head><body data-mode="automatic">
+<header><div><h1>Automatic text-to-gesture</h1><p>Mine pose-matched phrases, then retrieve clips with summed GloVe word vectors. Each displayed skeleton frame comes from the selected motion library.</p></div><a href="https://github.com/ghazanPK/automatic-text-to-gesture#implementation-and-usage">Data guide</a></header>
+<main class="layout"><section class="card"><div id="stage" aria-label="3D motion viewer"></div><label for="scrub">Motion frame</label><input id="scrub" type="range" min="0" max="0" value="0"><div class="controls"><button id="play">Pause</button><button id="speak" class="secondary">Speak query</button><select id="speech-backend" aria-label="Speech backend"><option value="browser">Browser voice</option><option value="kokoro">Local Kokoro</option></select></div><p class="small" id="frame-label">Run a query to load motion.</p></section>
+<section class="card"><form id="form"><label for="query">Text</label><input id="query" value="move forward together" required>
+<div id="threshold-wrap"><label for="threshold">Pose cosine threshold <output id="threshold-value">0.92</output></label><input id="threshold" type="range" min="0" max="1" step="0.01" value="0.92"></div>
+<div id="language-wrap" hidden><label for="language">Input language</label><input id="language" value="en" placeholder="en, ko, ..."></div>
+<div id="seed-wrap" hidden><label for="seed">Cluster sample seed</label><input id="seed" type="number" value="0"></div>
+<div class="controls"><button type="submit">Retrieve motion</button><label for="audio-input">Transcribe audio</label><input id="audio-input" type="file" accept="audio/*"></div></form><p id="status" role="status"></p>
+<div id="summary" class="small"></div><h2>Retrieval trace</h2><div id="trace"></div>
+<p class="small">Public data and downloaded text models are prepared locally. A procedural fixture, when used, is an illustration of the algorithm and carries no paper benchmark claim.</p>
+</section></main><script type="module" src="./app.js"></script></body></html>
