@@ -85,6 +85,33 @@ export function fingerBend(incoming,outgoing,axis,limit=1.45){
   a.normalize();b.normalize();
   return Math.max(-limit,Math.min(limit,Math.atan2(n.dot(new THREE.Vector3().crossVectors(a,b)),a.dot(b))));
 }
+export function thumbCurl(first,second){
+  if(first.lengthSq()<1e-10||second.lengthSq()<1e-10)return 0;
+  return Math.min(.55,first.angleTo(second)*.65);
+}
+export function fitThumb(bone,name,rig,positions,transform){
+  const match=name.match(/^thumb0([123])([lr])$/);if(!match)return false;
+  const [,segment,side]=match;
+  // A thumb's first bone is an opposition joint, not a finger hinge.
+  // Preserve the authored opposition: aiming it at an incompatible source
+  // metacarpal folds the webbing into the palm even with an angle limit.
+  bone.quaternion.copy(rig.bind.get(bone));
+  if(segment==='1'){bone.updateMatrixWorld(true);return true;}
+  const a=positions.get(`thumb01${side}`),b=positions.get(`thumb02${side}`),c=positions.get(`thumb03${side}`);
+  const next=rig.bones.get(`thumb03${side}`),middle=rig.bones.get(`middle01${side}`);
+  const proximal=rig.bones.get(`thumb02${side}`);
+  if(a&&b&&c&&next&&middle&&proximal){
+    const direction=next.getWorldPosition(new THREE.Vector3()).sub(proximal.getWorldPosition(new THREE.Vector3()));
+    const towardPalm=middle.getWorldPosition(new THREE.Vector3()).sub(proximal.getWorldPosition(new THREE.Vector3()));
+    const axis=new THREE.Vector3().crossVectors(direction,towardPalm);
+    if(axis.lengthSq()>1e-10){
+      axis.normalize().applyQuaternion(bone.parent.getWorldQuaternion(new THREE.Quaternion()).invert());
+      const angle=thumbCurl(transform(b.clone().sub(a)),transform(c.clone().sub(b)))*(segment==='3'?.45:1);
+      bone.quaternion.premultiply(new THREE.Quaternion().setFromAxisAngle(axis,angle));
+    }
+  }
+  bone.updateMatrixWorld(true);return true;
+}
 function fitFinger(bone,name,rig,positions,transform){
   const match=name.match(/^(index|middle|ring|pinky)0([123])([lr])$/);
   if(!match)return false;
@@ -274,6 +301,7 @@ export function createStage(container, options={}) {
       // from a single landmark; full quaternion clips retain head motion.
       if(name==='neck'||name==='head')continue;
       if((name==='lefthand'||name==='righthand')&&fitPalm(bone,actor.rig.bones,positions,transform)){applied++;continue;}
+      if(fitThumb(bone,name,actor.rig,positions,transform)){applied++;continue;}
       if(fitFinger(bone,name,actor.rig,positions,transform)){applied++;continue;}
       const from=positions.get(name);if(!from)continue;
       const child=poseDirectionChild(bone,positions);
