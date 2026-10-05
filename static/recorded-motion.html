@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Recorded BEAT motion viewer</title>
+  <style>
+    :root{color-scheme:dark;font-family:Inter,Segoe UI,Arial,sans-serif;background:#0b1020;color:#e9f1fb}
+    *{box-sizing:border-box}body{margin:0}header{padding:24px clamp(16px,4vw,54px);border-bottom:1px solid #294056;background:#101c2d}
+    .eyebrow{color:#72ddcf;font-size:12px;letter-spacing:.13em;text-transform:uppercase;font-weight:700}
+    h1{font-size:clamp(25px,3vw,38px);margin:8px 0}header p{margin:0;max-width:850px;color:#b5c9df;line-height:1.5}
+    main{display:grid;grid-template-columns:minmax(270px,340px) minmax(0,1fr);gap:20px;max-width:1450px;margin:auto;padding:22px}
+    .panel{background:#122035;border:1px solid #2b425d;border-radius:14px;padding:19px;min-width:0}
+    .panel h2{font-size:17px;margin:0 0 15px}.field{margin:15px 0}.field label{display:block;font-size:13px;font-weight:650;margin-bottom:7px;color:#c4d8ee}
+    .field input{display:block;width:100%;max-width:100%;font:inherit;color:#dae8f6;border:1px solid #415a76;border-radius:7px;background:#0d1727;padding:9px}
+    .help{font-size:12px;color:#9db1c9;line-height:1.5;margin:6px 0 0}.status{border-left:3px solid #72ddcf;background:#0b192a;padding:12px;min-height:45px;font-size:13px;line-height:1.5}
+    .facts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:16px 0}.fact{border:1px solid #2b425d;border-radius:8px;padding:10px;background:#0e1929}.fact strong{display:block;font-size:17px}.fact span{font-size:11px;color:#a6bad2}
+    .stage{height:min(59vw,510px);min-height:320px;border-radius:10px;overflow:hidden;background:#0c1625}.stage canvas{display:block;width:100%;height:100%}
+    .toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:17px 0 7px}button{border:1px solid #61cdbd;background:#17483f;color:#e5fff9;border-radius:8px;padding:9px 17px;font:inherit;font-weight:650;cursor:pointer}button:hover{background:#226355}button:disabled{opacity:.4;cursor:default}
+    #scrub{width:100%;accent-color:#72ddcf}#time{font-variant-numeric:tabular-nums;color:#bfd2e5;font-size:13px}
+    .transcript{min-height:49px;border-radius:8px;background:#0b192b;border:1px solid #2c435c;padding:12px;margin-top:14px;line-height:1.5}.transcript small{display:block;color:#83cfc4;margin-bottom:3px}.note{color:#a7bbd2;font-size:12px;line-height:1.55;margin-top:12px}
+    a{color:#8fdfeb}a:focus-visible,button:focus-visible,input:focus-visible{outline:2px solid #72ddcf;outline-offset:2px}
+    @media(max-width:850px){main{grid-template-columns:1fr;padding:14px}.stage{height:380px}header{padding:20px}}
+  </style>
+</head>
+<body>
+<header><div class="eyebrow">Recorded public dataset playback</div><h1>BEAT motion viewer</h1><p>Inspect synchronized body motion, facial blendshapes, and speech from a locally prepared BEAT clip. This is recorded dataset playback for visualization; it does not run a paper's gesture generation algorithm.</p></header>
+<main>
+  <section class="panel" aria-label="Local clip files">
+    <h2>Load local clip files</h2>
+    <div class="field"><label for="motion-file">Motion JSON · required</label><input id="motion-file" type="file" accept=".json,application/json"><p class="help">Open a prepared <code>*-motion.json</code> or <code>*-raw-motion.json</code> file.</p></div>
+    <div class="field"><label for="face-file">Face JSON · optional</label><input id="face-file" type="file" accept=".json,application/json"><p class="help">Adds 51 recorded ARKit channels, including the nine LUFA brow and eye channels.</p></div>
+    <div class="field"><label for="audio-file">Audio WAV · optional</label><input id="audio-file" type="file" accept=".wav,audio/wav,audio/x-wav"><p class="help">A matching cropped 16 kHz WAV keeps speech synchronized with the motion.</p></div>
+    <div id="status" class="status" role="status" aria-live="polite">Choose a motion file to begin. The character selector is in the upper right of the stage.</div>
+    <div class="facts"><div class="fact"><strong id="clip-name">—</strong><span>Sequence</span></div><div class="fact"><strong id="frame-count">—</strong><span>Frames</span></div><div class="fact"><strong id="fps">—</strong><span>Motion rate</span></div><div class="fact"><strong id="channels">—</strong><span>Face channels</span></div></div>
+    <p class="note">Files stay in this browser tab. Follow this repository's README for public BEAT preparation steps. No dataset clip or trained model is bundled with this viewer.</p>
+  </section>
+  <section class="panel" aria-label="Playback">
+    <div id="stage" class="stage"></div>
+    <div class="toolbar"><button id="play" disabled>Play</button><button id="restart" disabled>Restart</button><span id="time">0.00 / 0.00 s</span></div>
+    <input id="scrub" type="range" min="0" max="0" step="1" value="0" disabled aria-label="Motion frame">
+    <div class="transcript"><small>Aligned words</small><span id="words">Load a motion clip to inspect its transcript timing.</span></div>
+    <p class="note">Character motion is retargeted by the shared avatar renderer. Source and avatar skeletons differ, so this view is an inspection aid rather than a faithful reconstruction of the original performer.</p>
+  </section>
+</main>
+<script type="module">
+  import {createStage} from './avatar.js';
+  const $=id=>document.getElementById(id);
+  const stage=createStage($('stage'));
+  stage.camera.position.set(0,1.3,3.3);stage.camera.lookAt(0,.9,0);
+  $('stage').querySelector('select').addEventListener('change',async()=>{await stage.avatar.ready;if(motion)showFrame(frameIndex);});
+  const audio=new Audio();audio.preload='auto';
+  let motion=null,face=null,audioUrl=null,frameIndex=0,playing=false,startClock=0,startTime=0,raf=0;
+  const status=message=>{$('status').textContent=message;};
+  const duration=()=>motion ? motion.frames.length / Number(motion.fps) : 0;
+  function faceChannels(index){
+    if(!face)return null;
+    const names=face.names||face.lufaNames;
+    const rows=face.weights||face.lufaWeights;
+    if(!Array.isArray(names)||!Array.isArray(rows)||!rows.length)return null;
+    const sourceRate=Number(face.fps)||30;
+    const faceIndex=Math.min(rows.length-1,Math.floor(index / motion.fps * sourceRate));
+    return Object.fromEntries(names.map((name,j)=>[name,Number(rows[faceIndex]?.[j])||0]));
+  }
+  function showFrame(index){
+    if(!motion)return;
+    frameIndex=Math.max(0,Math.min(motion.frames.length-1,Math.floor(index)));
+    const frame=motion.frames[frameIndex];
+    const origin=motion.frames[0]?.rootTranslation;
+    const playbackFrame=Array.isArray(frame.rootTranslation)&&Array.isArray(origin)
+      ? {...frame,rootTranslation:frame.rootTranslation.map((value,axis)=>Number(value)-Number(origin[axis]||0))}
+      : frame;
+    const applied=stage.setMotionFrame(playbackFrame,stage.avatar,motion.source||{});
+    if(applied)stage.showAvatar();
+    else if(Array.isArray(frame.positions)){
+      const edges=(motion.source?.parents||[]).flatMap((parent,j)=>parent>=0?[[parent,j]]:[]);
+      stage.setSkeleton(frame.positions,edges);
+    }
+    stage.setFaceChannels(faceChannels(frameIndex));
+    $('scrub').value=String(frameIndex);
+    $('time').textContent=`${(frameIndex/motion.fps).toFixed(2)} / ${duration().toFixed(2)} s`;
+    const words=motion.annotations?.words||[];
+    const current=words.filter(word=>word.frame_start<=frameIndex&&word.frame_end>frameIndex).map(word=>word.text);
+    $('words').textContent=current.length?current.join(' '):(words.length?'…':'No word timing in this clip.');
+  }
+  function pause(){playing=false;cancelAnimationFrame(raf);audio.pause();$('play').textContent='Play';}
+  function tick(now){
+    if(!playing||!motion)return;
+    const elapsed=audio.src&&!audio.paused?audio.currentTime:startTime+(now-startClock)/1000;
+    if(elapsed>=duration()){showFrame(motion.frames.length-1);pause();return;}
+    showFrame(Math.floor(elapsed*motion.fps));raf=requestAnimationFrame(tick);
+  }
+  async function play(){
+    if(!motion)return;
+    if(frameIndex>=motion.frames.length-1)showFrame(0);
+    startTime=frameIndex/motion.fps;startClock=performance.now();playing=true;$('play').textContent='Pause';
+    if(audio.src){audio.currentTime=startTime;try{await audio.play();}catch(error){status(`Motion playing without audio: ${error.message}`);}}
+    raf=requestAnimationFrame(tick);
+  }
+  $('play').onclick=()=>playing?pause():play();
+  $('restart').onclick=()=>{pause();showFrame(0);if(audio.src)audio.currentTime=0;};
+  $('scrub').oninput=()=>{const resume=playing;if(resume)pause();showFrame(Number($('scrub').value));if(audio.src)audio.currentTime=frameIndex/motion.fps;if(resume)play();};
+  $('motion-file').onchange=async event=>{
+    pause();try{
+      const file=event.target.files?.[0];if(!file)return;
+      const data=JSON.parse(await file.text());
+      if(!Array.isArray(data.frames)||!data.frames.length||!(Number(data.fps)>0)||!Array.isArray(data.source?.jointNames))throw new Error('Expected prepared motion JSON with frames, fps, and source.jointNames.');
+      if(!Array.isArray(data.frames[0].quaternions)&&!Array.isArray(data.frames[0].positions))throw new Error('Motion frames need quaternions or positions.');
+      motion=data;frameIndex=0;$('scrub').max=String(data.frames.length-1);$('scrub').disabled=false;$('play').disabled=false;$('restart').disabled=false;
+      $('clip-name').textContent=data.sequenceId||file.name;$('frame-count').textContent=String(data.frames.length);$('fps').textContent=`${data.fps} Hz`;
+      const avatarResult=await stage.ready;showFrame(0);
+      status(avatarResult.loaded?`Ready: ${data.sequenceId||file.name}. Select a character in the stage, then play or scrub.`:
+        `Ready: ${data.sequenceId||file.name}. Showing the recorded skeleton while character assets are unavailable.`);
+    }catch(error){motion=null;$('play').disabled=true;$('restart').disabled=true;$('scrub').disabled=true;status(`Could not load motion: ${error.message}`);}
+  };
+  $('face-file').onchange=async event=>{
+    try{const file=event.target.files?.[0];if(!file){face=null;$('channels').textContent='—';return;}
+      const data=JSON.parse(await file.text()),names=data.names||data.lufaNames,rows=data.weights||data.lufaWeights;
+      if(!Array.isArray(names)||!Array.isArray(rows)||!rows.length||rows[0].length!==names.length)throw new Error('Expected face names and frame weight arrays.');
+      face=data;$('channels').textContent=String(names.length);if(motion)showFrame(frameIndex);status(`Face loaded: ${file.name}.`);
+    }catch(error){face=null;status(`Could not load face data: ${error.message}`);}
+  };
+  $('audio-file').onchange=event=>{
+    pause();if(audioUrl)URL.revokeObjectURL(audioUrl);audioUrl=null;audio.removeAttribute('src');audio.load();
+    const file=event.target.files?.[0];if(!file)return;
+    audioUrl=URL.createObjectURL(file);audio.src=audioUrl;audio.currentTime=motion?frameIndex/motion.fps:0;status(`Audio loaded: ${file.name}.`);
+  };
+  window.addEventListener('pagehide',()=>{pause();if(audioUrl)URL.revokeObjectURL(audioUrl);stage.dispose();},{once:true});
+</script>
+</body>
+</html>

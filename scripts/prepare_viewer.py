@@ -5,13 +5,12 @@ import argparse
 
 def prepare(destination):
     destination=Path(destination);destination.mkdir(parents=True,exist_ok=True)
-    for filename in ('three.module.js','three.core.js'):
-        try:
-            with urlopen('https://cdn.jsdelivr.net/npm/three@0.170.0/build/'+filename,timeout=60) as response:
-                content=response.read()
-        except Exception:
-            if filename=='three.core.js':continue  # 0.170 is a self-contained module.
-            raise
+    modules={'three.module.js':'build/three.module.js','GLTFLoader.js':'examples/jsm/loaders/GLTFLoader.js','BufferGeometryUtils.js':'examples/jsm/utils/BufferGeometryUtils.js'}
+    for filename,source in modules.items():
+        with urlopen('https://cdn.jsdelivr.net/npm/three@0.170.0/'+source,timeout=30) as response:
+            content=response.read()
+        if filename!='three.module.js':
+            content=content.decode().replace("from 'three'","from './three.module.js'").replace("from '../utils/BufferGeometryUtils.js'","from './BufferGeometryUtils.js'").encode()
         (destination/filename).write_bytes(content)
     print('Three.js 0.170.0 prepared in',destination)
 

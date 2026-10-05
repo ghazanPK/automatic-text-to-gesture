@@ -1,6 +1,6 @@
 import {createStage} from './avatar.js';
 import {Speech} from './speech.js';
-const stage=createStage(document.querySelector('#stage'));
+const stage=createStage(document.querySelector('#stage'));stage.camera.position.set(0,1.5,3.3);stage.camera.lookAt(0,.95,0);
 const speech=new Speech(stage);
 const $=s=>document.querySelector(s);
 const mode=document.body.dataset.mode;
@@ -19,10 +19,10 @@ function draw(){
   const scale=data.motionScale||1;
   centered=centered.map(p=>[p[0]*scale,1.35+p[1]*scale,p[2]*scale]);
   const edges=edgeNames.filter(([a,b])=>names.includes(a)&&names.includes(b)).map(([a,b])=>[names.indexOf(a),names.indexOf(b)]);
-  stage.setSkeleton(centered,edges);
+  if (!stage.setPosePositions?.(centered,names)) stage.setSkeleton(centered,edges);
   $('#scrub').value=frame;$('#frame-label').textContent=`Frame ${frame+1}/${frames.length} · ${current.slot.gesture_id} · ${current.slot.text||''}`;
 }
-function tick(now){if(playing&&data){const fps=data.fps||15;const delta=Math.floor((now-last)/(1000/fps));if(delta){frame=(frame+delta)%allFrames().length;last=now;draw();}}requestAnimationFrame(tick);}requestAnimationFrame(tick);
+let lastRig=null;function tick(now){if(data&&!playing&&stage.avatar.rig!==lastRig){lastRig=stage.avatar.rig;draw();}if(playing&&data){const fps=data.fps||15;const delta=Math.floor((now-last)/(1000/fps));if(delta){frame=(frame+delta)%allFrames().length;last=now;draw();}}requestAnimationFrame(tick);}requestAnimationFrame(tick);
 $('#play').onclick=()=>{playing=!playing;$('#play').textContent=playing?'Pause':'Play';last=performance.now();};
 $('#scrub').oninput=()=>{frame=Number($('#scrub').value);draw();};
 $('#speak').onclick=async()=>{try{await speech.speak($('#query').value,{backend:$('#speech-backend').value});}catch(e){$('#status').textContent=e.message;}};

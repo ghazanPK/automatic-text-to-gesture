@@ -24,3 +24,7 @@
 ## Interactive data handoff
 
 The browser queries the existing retrieval implementation and renders the selected motion frames with a pinned local Three.js module. Its immediate example mode is author-created motion plus explicitly illustrative, untrained vectors. Production mode accepts the documented public BVH/timed-transcript preparation outputs, real local encoder assets and trained checkpoints as appropriate. The preparation adapter preserves motion/transcript alignment and declares skeleton/FPS assumptions; it does not fabricate annotations or evaluation results. Speech is optional and replaceable (Kokoro-82M English/faster-whisper small CPU INT8, with browser voice/typed-input alternatives). Verification must cover clip serialization and algorithm routing, with model quality evaluation deferred to user-prepared public data.
+
+## Bundled fictional avatar substitution
+
+Two newly generated fictional CC0 humanoids replace the original avatar assets in the browser demo. They provide a 53-bone rig and named ARKit/viseme targets. Motion retargeting adapts source joints to their bind pose; speaking envelopes approximate mouth motion rather than phoneme alignment. The optional recorded BEAT companion inspects public motion, face and audio files prepared locally, independently of the paper's learned algorithm. No dataset recordings or trained weights are bundled.
