@@ -22,6 +22,16 @@ export function avatarBoneKey(name) {
   return Object.entries(ALIASES).find(([,names])=>names.includes(s))?.[0] || s;
 }
 const key=avatarBoneKey;
+const POSE_CHILD={hips:'spine',spine:'chest',chest:'upperchest',upperchest:'neck',neck:'head',
+  leftshoulder:'leftarm',rightshoulder:'rightarm',leftarm:'leftforearm',rightarm:'rightforearm',
+  leftforearm:'lefthand',rightforearm:'righthand',lefthand:'middle01l',righthand:'middle01r',
+  leftupleg:'leftleg',rightupleg:'rightleg',leftleg:'leftfoot',rightleg:'rightfoot'};
+export function poseDirectionChild(bone,positions){
+  const children=bone.children.filter(o=>o.isBone&&positions.has(key(o.name)));
+  const preferred=POSE_CHILD[key(bone.name)];
+  // A torso branch must follow the spine, never the first shoulder or thigh.
+  return children.find(o=>key(o.name)===preferred)||(children.length===1?children[0]:null);
+}
 function quaternion(value, type='quaternion') {
   if (!value) return null;
   if (type==='rotation6d' && value.length>=6) {
@@ -183,10 +193,11 @@ export function createStage(container, options={}) {
       bone.quaternion.copy(bindRelativeWorldRotation(reflectQuaternion(world(local,index,frameWorld),signs),reflectQuaternion(world(rest,index,restWorld),signs),actor.rig.restWorld.get(bone),parentWorld,basis));
       bone.updateMatrixWorld(true);applied++;
     }
-    // BVH rest axes differ from the GLB's anatomical bind axes. World rotation
-    // deltas alone can fold A-pose arms behind the torso. Source FK landmarks
-    // constrain the actual limb directions while retaining quaternion twist.
-    if(Array.isArray(frame.positions))setPosePositions(frame.positions,names,actor,{basis:source.restBasis,axisSigns:signs,preservePose:true});
+    // Canonical humanoid rotation axes are not MPFB skinning bind axes.
+    // Applying their twist before fitting landmarks collapses the arm meshes.
+    // Fit FK landmarks from the target bind pose; never retain uncalibrated
+    // source twist. Quaternion-only inputs keep the explicit delta path above.
+    if(Array.isArray(frame.positions))setPosePositions(frame.positions,names,actor,{basis:source.restBasis,axisSigns:signs});
     actor.motionActive=applied>0;
     if(frame.rootTranslation){const p=new THREE.Vector3(...frame.rootTranslation.map((v,i)=>(Number(v)||0)*signs[i])).applyQuaternion(basis);actor.root.position.copy(p);}
     return applied>0;
@@ -214,7 +225,7 @@ export function createStage(container, options={}) {
       // from a single landmark; full quaternion clips retain head motion.
       if(name==='neck'||name==='head')continue;
       const from=positions.get(name);if(!from)continue;
-      const child=[...bone.children].find(o=>o.isBone&&positions.has(key(o.name)));
+      const child=poseDirectionChild(bone,positions);
       if(!child)continue;
       const target=transform(positions.get(key(child.name)).clone().sub(from));
       if(aimBoneToward(bone,child,target))applied++;
