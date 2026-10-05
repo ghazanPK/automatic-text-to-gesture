@@ -1,9 +1,14 @@
 """Build a small natural co-speech bank and a separate association pool locally.
 
 Dataset recordings stay in ignored outputs/data directories. The default public
-route downloads one BVH and its word alignment, not the full BEAT archive;
-``--takes``/``--speakers`` select more takes from a processed OmniMo collection,
-a local raw ``beat_english_v0.2.1`` folder, or named public takes.
+route downloads four named takes from three speakers (``DEFAULT_TAKES``, about
+80 MB of BVH plus word alignments, capped per file and in total), not the full
+BEAT archive; ``--takes``/``--speakers`` select other takes from a processed
+OmniMo collection, a local raw ``beat_english_v0.2.1`` folder, or named public
+takes. With several speakers the speaker of ``TAKE`` feeds the bank
+(``library``) so the reviewed windows and the cached semantic annotations stay
+valid; the other speakers become disjoint ``train`` and ``wild`` association
+pools.
 
 Bank clips and association windows are disjoint 2.5 s windows. Bank clips keep
 every word overlapping them; association windows drop any word that overlaps a
@@ -21,18 +26,26 @@ import numpy as np
 import beat_ingest as ingest
 
 TAKE = '1_wayne_0_1_1'
+# Default public selection: library = speaker 1 (TAKE), train = speaker 2, wild = speaker 4 (two takes, so the
+# held-out rule pool has the most transcript text). Each BVH is 17-22 MB; all four stay under DOWNLOAD_TOTAL_CAP.
+DEFAULT_TAKES = [TAKE, '2_scott_0_1_1', '4_lawrence_0_1_1', '4_lawrence_0_2_2']
+DOWNLOAD_TOTAL_CAP = 120_000_000
 BASE = ingest.HF_BASE + '1/'
 ROOT_URL = ingest.HF_BASE
 WINDOW = 75
 OFFSET = 30
 REVIEWED_STARTS = [1080, 480, 1005, 1905, 1680, 1755, 780, 1830, 1230]
-BUILDER = 'v3'  # v3: continuous library/train streams in <bank>-streams.npz
+BUILDER = 'v4'  # v3: continuous library/train streams; v4: multi-take default, TAKE's speaker is the library
 
 
 def fetch(name, folder, cap=25_000_000, url=None):
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / name
     if not path.exists():
+        cached = sum(p.stat().st_size for p in folder.iterdir() if p.is_file())
+        if cached > DOWNLOAD_TOTAL_CAP:
+            raise ValueError(f'The public BEAT download folder already holds {cached / 1e6:.0f} MB '
+                             f'(cap {DOWNLOAD_TOTAL_CAP / 1e6:.0f} MB); remove unused takes from {folder}')
         part = path.with_suffix(path.suffix + '.part')
         try:
             with urllib.request.urlopen(url or BASE + name, timeout=60) as response, part.open('wb') as output:
@@ -68,7 +81,7 @@ def load_records(processed=None, source=Path('outputs/beat-library/source'), *, 
     """Load the selected takes (30 fps, all joints, metres, canonical basis)."""
     speakers, takes = _names(speakers), _names(takes)
     if not speakers and not takes:
-        takes = [TAKE]
+        takes = list(DEFAULT_TAKES)
     options = {'fps': 30, 'max_frames': max_frames}
     if processed or raw_root:
         root = Path(processed or raw_root)
@@ -97,6 +110,13 @@ def _roles(records, seed):
         return {records[0]['take']: 'shared'}, 'single take'
     if len(records) == 2:
         return {records[0]['take']: 'library', records[1]['take']: 'associations'}, 'take'
+    speakers = sorted({d['speaker'] for d in descriptors})
+    anchor = next((r['speaker'] for r in records if r['take'] == TAKE), None)
+    if anchor is not None and len(speakers) >= 3:
+        # TAKE's speaker is the library (reviewed bank windows, cached annotations); the wild pool, whose
+        # transcripts become the pose modes' rule text, gets the larger share of the remaining speakers.
+        return ingest.role_assignment(descriptors, {'library': [anchor], 'train': 0.4, 'wild': 'rest'}, seed,
+                                      unit='speaker')
     mapping, unit = ingest.role_assignment(descriptors, {'library': 1 / 3, 'train': 1 / 3, 'wild': 'rest'}, seed)
     return mapping, unit
 
@@ -170,7 +190,7 @@ def build(processed=None, source=Path('outputs/beat-library/source'), count=9, *
     lookup = {(c['take'], c['start']): i for i, c in enumerate(candidates)}
     picked = []
     selection = 'greedy hand-descriptor diversity over library windows above the motion-energy floor'
-    if count == 9 and len(records) == 1 and records[0]['take'] == TAKE:
+    if count == 9 and any(r['take'] == TAKE and (shared or roles.get(TAKE) == 'library') for r in records):
         position = {index: k for k, index in enumerate(eligible)}
         picked = [position[lookup[(TAKE, s)]] for s in REVIEWED_STARTS
                   if lookup.get((TAKE, s)) in position]

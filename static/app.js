@@ -1,6 +1,6 @@
-import {createStage} from './avatar.js?v=20261006-paper1';
-import {Speech} from './speech.js?v=20261006-paper1';
-import {MotionSequence,loadGestureLibrary} from './gesture-library.js?v=20261006-paper1';
+import {createStage} from './avatar.js?v=20261006-paper2';
+import {Speech} from './speech.js?v=20261006-paper2';
+import {MotionSequence,loadGestureLibrary} from './gesture-library.js?v=20261006-paper2';
 const stage=createStage(document.querySelector('#stage'));stage.camera.position.set(0,1.5,3.3);stage.camera.lookAt(0,.95,0);
 const speech=new Speech(stage);
 const $=s=>document.querySelector(s);
@@ -32,8 +32,11 @@ function renderLibrary(library){
   const title=document.createElement('strong');title.textContent='Prepared BEAT gesture bank';libraryPanel.append(title);
   if(!library){const note=document.createElement('p');note.className='small';note.textContent='Local BEAT bank unavailable. The bundled authored starter remains available.';libraryPanel.append(note);return;}
   const count=document.createElement('p');count.className='small';
-  const metrics=formatMetrics(library.metrics);
-  count.textContent=`${library.clips.length} prepared clips${metrics.length?' · '+metrics.join(' · '):''} · Select an utterance to see its sequence and retrieval route.`;libraryPanel.append(count);
+  const {playable_clips:playable,bank_clips:bankClips,...rest}=library.metrics||{};
+  const metrics=formatMetrics(rest);
+  const playableCount=library.clips.length;
+  const bankNote=Number.isFinite(Number(bankClips))&&Number(bankClips)!==playableCount?` (from ${bankClips} local bank windows)`:'';
+  count.textContent=`${playableCount} playable clip${playableCount===1?'':'s'}${bankNote}${metrics.length?' · '+metrics.join(' · '):''} · Select an utterance to see its sequence and retrieval route.`;libraryPanel.append(count);
   if(mode==='automatic'&&Number.isFinite(Number(library.default_threshold))&&library.default_threshold!==null){
     $('#threshold').value=String(library.default_threshold);$('#threshold-value').textContent=Number(library.default_threshold).toFixed(2);
     if(library.threshold_rule){const note=document.createElement('p');note.className='small';note.textContent=`Default threshold: ${library.threshold_rule}.`;libraryPanel.append(note);}
@@ -116,7 +119,7 @@ $('#form').onsubmit=async e=>{
     const routes=Array.isArray(result.trace)?result.trace:result.slots;
     routes.forEach((row,index)=>{const tr=document.createElement('tr');const route=row.route||row.source?.route||row.source||(`cluster ${row.cluster_id??'—'}`);const routeLabel=typeof route==='object'?route.name||route.type||JSON.stringify(route):route;const score=row.confidence??row.similarity;[`${index+1}. ${row.text||row.english_text||row.matched_text||''}`,row.gesture_id||row.id,routeLabel,Number.isFinite(Number(score))?Number(score).toFixed(3):'—'].forEach(value=>{const td=document.createElement('td');td.textContent=value;tr.append(td);});table.append(tr);});
     $('#trace').replaceChildren(table);
-    $('#status').textContent=result.no_match?'No rule passed the similarity floor; the avatar holds an idle pose.':(result.slots.some(slot=>slot.route==='idle_no_match')?'Motion loaded; unmatched spans hold an idle pose.':'Motion loaded.');
+    $('#status').textContent=result.trace?.translation_note?`Idle: ${result.trace.translation_note}`:result.no_match?'No rule matched this text; the avatar holds an idle pose.':(result.slots.some(slot=>slot.route==='idle_no_match')?'Motion loaded; unmatched spans hold an idle pose.':'Motion loaded.');
   }catch(error){$('#status').textContent=error.message;}
 };
 

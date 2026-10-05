@@ -103,7 +103,7 @@ and allocated in spec order, with at least one item per role while items remain.
 ## CLI
 
 ```bash
-python scripts/beat_demo/beat_ingest.py list   --source E:/datasets/processed/beat --speakers 1,2
+python scripts/beat_demo/beat_ingest.py list   --source <path-to>/processed/beat --speakers 1,2
 python scripts/beat_demo/beat_ingest.py ingest --source <root> --output data/beat-records \
        --speakers 1,2 --max-takes-per-speaker 3 --fps 15 --upper-body --center neck
 python scripts/beat_demo/beat_ingest.py roles  --source <root> --role library=1 --role train=0.5 --role wild=rest
@@ -158,23 +158,42 @@ are additive. The existing loaders ignore them.
 
 ## Shared demo bank (`build_library.py`)
 
-The default bank still uses the single public take `1_wayne_0_1_1` and nine clips.
-Its reviewed windows keep the cached semantic annotations valid. Larger banks are
-selected with flags:
+An unflagged run (what `start_demo.py` does) builds the **default bank**:
+
+- **Public default.** Four named takes from three speakers (`DEFAULT_TAKES`):
+  `1_wayne_0_1_1` (library), `2_scott_0_1_1` (train), `4_lawrence_0_1_1` and
+  `4_lawrence_0_2_2` (wild). That is about 80 MB of BVH plus word alignments from
+  Hugging Face, with a 25 MB cap per file and a 120 MB cap on the download folder.
+  The result is 9 bank clips and about 85 association windows.
+- **Processed default.** When `BEAT_PROCESSED_ROOT` names a local OmniMo
+  collection, speakers 1–6 with two takes each are used instead (about 160
+  association windows).
+- **Roles.** With three or more speakers, the speaker of `1_wayne_0_1_1` is the
+  `library`, so the nine reviewed windows and the cached semantic annotations stay
+  valid. About 40% of the other speakers become `train` and the rest `wild`. The
+  wild pool supplies the pose modes' rule text, so it gets the larger share.
+
+Other banks are selected with flags:
 
 ```bash
-python scripts/prepare_beat_demo.py --processed E:/datasets/processed/beat --speakers 1,2,3 --max-takes-per-speaker 2
-python scripts/prepare_beat_demo.py --raw-root D:/beat_english_v0.2.1 --speakers 2,4
+python scripts/prepare_beat_demo.py --processed <path-to>/processed/beat --speakers 1,2,3 --max-takes-per-speaker 2
+python scripts/prepare_beat_demo.py --raw-root <path-to>/beat_english_v0.2.1 --speakers 2,4
 python scripts/prepare_beat_demo.py --takes 1_wayne_0_1_1,2_scott_0_1_1   # public download, <=25 MB per file
 ```
 
-**Scaling up.** One take per role gives small pools (about 9 bank clips and 50
-association windows for speakers 1–3). Add `--speakers` or raise
-`--max-takes-per-speaker` for more units, training pairs and rules.
+**Why several takes.** A single take gave nine bank windows and 18 association
+windows. That was too little transcript text for any application line to share
+vocabulary with a rule, and too little motion to train GestureCLR (held-out
+cross-view top-1 equalled chance, and 8 of 9 wild rules mapped to one unit).
 
-**Rebuilds.** Changing these flags rebuilds the bank. A bank written by an older
-builder is also rebuilt, from its stored selection, on the next unflagged run.
-The current builder is `v3`.
+**Rebuilds.**
+
+- Changing the flags rebuilds the bank.
+- An unflagged run keeps a bank that was built from explicit flags; an older
+  builder rebuilds it from its stored selection.
+- A bank from the former single-take default is upgraded to the current default.
+- A bank without build settings (assembled by hand) is kept.
+- The current builder is `v4`.
 
 **Cache key.** The adapter is refitted when its cache key changes. The key covers:
 
@@ -216,26 +235,56 @@ preparation, response formatting and the idle floor.
 
 All four modes share these rules.
 
-- **Text encoders.**
-  - **Sentence-BERT.** Used only from a local model folder, given by
-    `BEAT_SBERT_MODEL` or `prepare_beat_demo.py --sbert`. Nothing is downloaded.
-  - **TF-IDF fallback.** Used otherwise. The response says so in
+- **Text encoders.** Local models are picked up automatically. Nothing is
+  downloaded.
+  - **Sentence-BERT** comes from `prepare_beat_demo.py --sbert`,
+    `BEAT_SBERT_MODEL`, `SBERT_MODEL` (the variable the paper-method scripts
+    read), or `<repo>/models/all-MiniLM-L6-v2`.
+  - **TF-IDF fallback** is used otherwise. The response says so in
     `text_encoder` (`tfidf-fallback (...)`).
-  - **Automatic mode** uses GloVe when `BEAT_GLOVE_PATH` names a local file,
-    and labelled bag-of-words vectors otherwise.
-- **Idle floor.**
-  - A chunk with no in-vocabulary content word plays an explicit `idle` slot.
-    So does a chunk scoring below `min_similarity`: 0.2 with TF-IDF or
-    bag-of-words, 0.35 with Sentence-BERT.
-  - An idle slot has route `idle_no_match`, confidence 0 and a still neutral
-    pose.
-  - `no_match` is true when every slot idles.
+  - **Model names only.** Responses and `index.json` name the model (for
+    example `sentence-bert (all-MiniLM-L6-v2)`), never its absolute path. The
+    folder is resolved again from the same settings at query time.
+  - **Automatic mode** sums word vectors as Algorithm 2 does. It uses GloVe from
+    `BEAT_GLOVE_PATH`, `GLOVE_PATH` or `<repo>/models/glove.*.txt`. Without
+    GloVe but with a local Sentence-BERT, each content word is encoded on its own
+    and used as its word vector (labelled). Only words in the model's word-piece
+    vocabulary get a vector, so gibberish and untranslated Hangul stay
+    out-of-vocabulary. Without either model it uses labelled bag-of-words
+    vectors.
+- **Idle semantics.** Each mode follows its paper.
+  - **Automatic (Algorithm 2).** The best rule is played whenever a chunk shares
+    vocabulary with the rule map. There is no similarity floor. Only true OOV
+    chunks idle.
+  - **Wild and Multilingual.** The best rule's cluster is played. The papers'
+    optional low-similarity fallback idles a chunk below `min_similarity`:
+    - TF-IDF: `1e-6`, so only a chunk sharing no content word idles.
+    - Sentence-BERT: 0.15. Default application lines score 0.16–0.43 against
+      BEAT rules, and gibberish scores 0.10–0.12.
+    - A chunk with no in-vocabulary content word also idles.
+  - **RIDGE.** Unchanged. Its trained fallback answers any chunk with an
+    in-vocabulary word, by design. Fallback slots carry `similarity` and a
+    softmax-share `confidence`.
+  - **Overrides.** A request's `min_similarity` overrides the default in every
+    mode.
+  - **Idle slots.** An idle slot has route `idle_no_match`, confidence 0, a
+    still neutral pose and a `rule_source.reason`. `no_match` is true when every
+    slot idles.
 - **Reporting.** `metrics.route_counts` and `text_encoder` come with every
   query.
-- **Suggested queries.** These are chosen at prepare time and checked by
-  running them through `query`.
+- **Suggested queries.**
+  - They are chosen at prepare time and kept only when the query retrieves at
+    least one clip and no idle slot.
+  - Wild and Multilingual offer up to five, one per cluster. Each must retrieve
+    through its own rule (`rule_source.rule_text`).
+  - The runtime adds Korean lines from `examples/beat-translations.json` only
+    when they retrieve a clip.
+- **Model loading.** Sentence-BERT and RIDGE models load once per process,
+  behind a lock. A failed load is not cached, so concurrent first requests on a
+  fresh server are safe.
 - **Gesture ids.**
-  - Automatic plays the three bank seed clips: `beat_01`–`beat_03`.
+  - Automatic plays every bank clip: `beat_01`–`beat_09`. The three seed clips
+    also form the manual map.
   - Wild and Multilingual play extracted units, with window ids
     `<take>:<start>-<end>` in 30 fps take frames.
   - RIDGE plays bank clips, plus phrase spans with ids
@@ -246,7 +295,7 @@ All four modes share these rules.
 ### Automatic (`automatic_text_to_gesture.core`)
 
 - **Mining.** `mine_clips` (Algorithm 1) mines every association window with a
-  padding-aware `GestureBank`.
+  padding-aware `GestureBank` built from every bank clip.
   - The window stride equals the gesture length.
   - Phrases come from `aligned_phrase` and have at most 5 words.
   - Among the passing gestures, one is picked at random with the seed.
@@ -260,13 +309,20 @@ All four modes share these rules.
   - **Auto map.** The mined rules (route `mined_pose_rule`).
   - **Chunking.** Paper chunks of 5 words. A trailing piece under 5 words is
     dropped.
-  - Out-of-vocabulary chunks play idle.
+  - Out-of-vocabulary chunks play idle. There is no similarity floor.
   - `map=manual|auto` selects one map only.
 - **Deviation from the paper.**
-  - **Change.** Poses are frontal arm and hand XY with the dataset mean pose
-    removed before the cosine.
-  - **Why.** On raw neck-relative poses, every bank gesture scored about 0.96
-    against every window, so all rules collapsed onto one gesture.
+  - **Change.** Poses are frontal arm and hand XY. Before the cosine, the
+    dataset mean pose is removed and each coordinate is divided by its dataset
+    standard deviation.
+  - **Why.** On raw neck-relative poses every bank gesture scored about 0.96
+    against every window. With only the mean removed, the high-variance
+    coordinates (raised hands) still dominated the cosine. Mined rules then
+    piled onto one gesture: all 11 rules went to `beat_02` with the single-take
+    bank.
+  - **Effect.** The criterion is unchanged: mean frame cosine above the
+    threshold, with a random pick among passing gestures. With the default bank,
+    29 rules spread over all nine clips, and no clip takes more than 17%.
   - **Index note.** The index records this in `threshold_rule`.
 - **Metrics.** Reported metrics are `rule_usage`, `max_clip_share`,
   `pair_pass_rate` and `mean_passing_gestures`.
@@ -288,6 +344,11 @@ All four modes share these rules.
 - **Rules.** `wild` associations are projected at yaw 20° and pitch 5°, then
   corrupted with noise, jitter and dropout. `build_rules` maps them to their
   nearest unit, and units are grouped with `cluster_latents`.
+  - **Centring.** Both steps use per-modality mean-centred latents. The
+    demo-budget latents are anisotropic: unit latents share a mean pairwise
+    cosine of about 0.8, so a plain nearest-unit match sent most wild windows to
+    one hub unit. Centring keeps the cosine-argmax criterion.
+  - **Multilingual.** The Multilingual adapter does the same.
 - **Retrieval.** `pipeline.retrieve` matches 6-word chunks. It samples a unit at
   random inside the matched cluster, with a numpy generator seeded once per
   query.
@@ -312,7 +373,11 @@ All four modes share these rules.
   - **Settings.** These variables configure it: `BEAT_TRANSLATOR_URL`,
     `BEAT_TRANSLATOR_MODEL`, `BEAT_TRANSLATOR_API`,
     `BEAT_TRANSLATOR_API_KEY_ENV` and `BEAT_MT_MODEL_PATH`.
-  - **Missing translation.** A missing translation raises an error.
+  - **Missing translation.** An untranslated chunk is not an error. It plays an
+    explicit idle slot, and `trace.translation_note` says how to add a
+    translation. The same happens when a configured MT service fails.
+    Explicit routes (`english_text`, `translation_map`, the examples table) are
+    unchanged.
 
 ### RIDGE (`ridge_gesture`)
 
@@ -342,13 +407,16 @@ All four modes share these rules.
 
 ### Small-data caveat
 
-These are small local simulations, not benchmark reproductions. With speakers
-1–3 and one take per role, the measured signals were weak:
+These are small local simulations, not benchmark reproductions. These numbers
+were measured on the public default bank (60 wild windows), with Sentence-BERT:
 
-- **Wild and Multilingual.**
-  - Held-out cross-view top-1 was 0.12, against 0.04 chance.
-  - Learned rules concentrated on 4 units for Wild and 7 for Multilingual.
-- **RIDGE.** The fallback's held-out top-1 was at chance or below.
+- **Wild.**
+  - Held-out cross-view top-1 was 0.23, against 0.017 chance.
+  - 10 of 21 units were matched; the largest unit share was 0.40.
+- **Multilingual.**
+  - Held-out cross-view top-1 was 0.18, against 0.017 chance.
+  - 14 of 20 units were matched; the largest unit share was 0.28.
+- **RIDGE.** The fallback's held-out top-1 was at chance.
 
 More takes or speakers, a local Sentence-BERT, or the `paper` training presets
 are needed for meaningful numbers.

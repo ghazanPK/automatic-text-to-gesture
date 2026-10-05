@@ -349,6 +349,34 @@ function createRig(model,metrics){
   return rig;
 }
 
+// Palm normal of a skinned hand from its finger bases: fingers x (index - little), signed per side so it
+// points out of the palm (T-pose palms face down for both hands).
+export function palmNormal(rig,side){
+  const s=side==='left'?'l':'r',hand=rig.bones.get(side+'hand'),middle=rig.bones.get(`middle01${s}`),index=rig.bones.get(`index01${s}`),little=rig.bones.get(`pinky01${s}`);
+  if(!hand||!middle||!index||!little)return null;
+  const at=b=>b.getWorldPosition(new THREE.Vector3());
+  const normal=new THREE.Vector3().crossVectors(at(middle).sub(at(hand)),at(index).sub(at(little))).multiplyScalar(side==='left'?1:-1);
+  return normal.lengthSq()>1e-12?normal.normalize():null;
+}
+// Pronation/supination: twist the forearm (most) and the wrist (rest) about the forearm axis so the palm
+// normal turns toward ``target`` (world space). Rigs without finger bones are left unchanged.
+function turnPalm(rig,side,target){
+  const fore=rig.bones.get(side+'forearm'),hand=rig.bones.get(side+'hand');
+  if(!fore||!hand||!fore.parent||!hand.parent)return false;
+  const twist=(bone,share)=>{
+    const normal=palmNormal(rig,side);if(!normal)return false;
+    const axis=hand.getWorldPosition(new THREE.Vector3()).sub(fore.getWorldPosition(new THREE.Vector3()));
+    if(axis.lengthSq()<1e-10)return false;axis.normalize();
+    const p=normal.clone().addScaledVector(axis,-normal.dot(axis)),q=target.clone().addScaledVector(axis,-target.dot(axis));
+    if(p.lengthSq()<1e-10||q.lengthSq()<1e-10)return false;
+    const angle=Math.atan2(axis.dot(new THREE.Vector3().crossVectors(p,q)),p.dot(q))*share;
+    const parent=bone.parent.getWorldQuaternion(new THREE.Quaternion());
+    bone.quaternion.premultiply(parent.clone().invert().multiply(new THREE.Quaternion().setFromAxisAngle(axis,angle)).multiply(parent));
+    bone.updateMatrixWorld(true);return true;
+  };
+  return twist(fore,.6)&&twist(hand,1);
+}
+
 // World-space anatomical directions avoid assuming that imported skinning
 // bones share the local Euler axes of the old procedural stick character.
 export function applyGesturePose(rig,name='idle',t=0){
@@ -360,7 +388,9 @@ export function applyGesturePose(rig,name='idle',t=0){
   for(const side of ['left','right']){
     const sign=side==='left'?1:-1;
     let upper=[sign*.18,-1,.05],lower=[sign*.06,-1,.12];
-    if(open){upper=[sign*.6,-.85,.18];lower=[sign*(.5+.15*beat),.15+.12*beat,.8];}
+    // Open-palm presentation: elbows stay near the body, forearms come forward and slightly apart at
+    // waist-to-chest height, palms turned up (not arms spread to the sides, which reads as a T-pose).
+    if(open){upper=[sign*.3,-.88,.36];lower=[sign*(.45+.1*beat),.12+.05*beat,.88];}
     if((point||wave||think)&&side==='right'){
       upper=think?[-.25,-.65,.65]:wave?[-.75,.35,.35]:[-.65,-.12,.8];
       lower=think?[.12,.9,.2]:wave?[-.15,1,.15+.3*beat]:[-.7,.05+.08*beat,.8];
@@ -368,6 +398,7 @@ export function applyGesturePose(rig,name='idle',t=0){
     if(/beat/.test(n)&&side==='right'){upper=[-.3,-.8,.35];lower=[-.3,.15+.3*beat,.85];}
     if(walk){upper=[sign*.12,-1,(side==='left'?1:-1)*.3*Math.sin(t*7)];lower=[sign*.06,-1,.1];}
     aim(side+'arm',side+'forearm',upper);aim(side+'forearm',side+'hand',lower);
+    if(open)turnPalm(rig,side,new THREE.Vector3(-sign*.25,.93,.25).applyQuaternion(basis));
     if(sit){aim(side+'upleg',side+'leg',[sign*.12,-.15,.9]);aim(side+'leg',side+'foot',[0,-1,.1]);}
     else if(walk){aim(side+'upleg',side+'leg',[sign*.06,-1,(side==='left'?1:-1)*.3*Math.sin(t*7)]);}
   }
@@ -821,7 +852,7 @@ export function createStage(container, options={}) {
       a.legs.forEach((l,i)=>l.rotation.x=a.walking?.3*Math.sin(t*8+i*Math.PI):0);
       a.arms[0].rotation.set(0,0,.08);a.arms[1].rotation.set(0,0,-.08);
       if(/point|touch|reach/.test(a.gesture)){a.arms[1].rotation.x=-1.2;a.arms[1].rotation.z=-.35;}
-      else if(/welcome|open|explain/.test(a.gesture)){a.arms[0].rotation.z=.65;a.arms[1].rotation.z=-.65;a.arms.forEach(l=>l.rotation.x=-.25);}
+      else if(/welcome|open|explain/.test(a.gesture)){a.arms[0].rotation.z=.3;a.arms[1].rotation.z=-.3;a.arms.forEach(l=>l.rotation.x=-.75);}
       else if(/think/.test(a.gesture))a.arms[1].rotation.x=-2.2;
       else if(/wave|beat/.test(a.gesture))a.arms[1].rotation.z=-1.6+.25*Math.sin(t*5);
       a.mouth.scale.y=clamp(f.jawOpen)*.8+.15;

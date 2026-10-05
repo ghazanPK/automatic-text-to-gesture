@@ -20,15 +20,18 @@ text queries through the paper package's own algorithms:
   package's ``train`` command on association windows only (the bank is held
   out), ``hybrid_retrieve`` and ``GCA``.
 
-Text matching uses Sentence-BERT only when a local model folder is configured
-(``sbert=`` or ``BEAT_SBERT_MODEL``); otherwise a TF-IDF fallback is used and
-named in every response's ``text_encoder`` field. Prepared motion, fitted
-weights and imported annotations belong in ignored output directories. This
-small-data demonstration does not reproduce paper benchmarks.
+Text matching uses Sentence-BERT whenever a local model folder is configured
+(``sbert=``, ``BEAT_SBERT_MODEL``, ``SBERT_MODEL`` or ``<repo>/models``);
+otherwise a TF-IDF fallback is used and named in every response's
+``text_encoder`` field (model names only, never local paths). Prepared motion,
+fitted weights and imported annotations belong in ignored output directories.
+This small-data demonstration does not reproduce paper benchmarks.
 
-Every mode applies a similarity floor: text with no in-vocabulary content word,
-or below ``min_similarity``, plays an explicit ``idle`` slot (route
-``idle_no_match``) instead of a clip at high confidence.
+Idle slots (route ``idle_no_match``) follow each paper: Automatic idles only
+chunks without vocabulary overlap (Algorithm 2 has no similarity floor); Wild
+and Multilingual play the best rule and use ``min_similarity`` only as the
+papers' optional low-similarity fallback; untranslated multilingual input idles
+with a note instead of raising.
 """
 from __future__ import annotations
 
@@ -40,6 +43,7 @@ import json
 import math
 import os
 import re
+import threading
 import time
 from collections import Counter
 from pathlib import Path
@@ -48,10 +52,15 @@ import numpy as np
 
 MODES = {"automatic", "wild", "multilingual", "ridge"}
 WORDS = re.compile(r"[\w']+", re.UNICODE)
-CODE_VERSION = "2026-10-06.s3"
+CODE_VERSION = "2026-10-06.f1"
 IDLE_ID = "idle"
-MIN_SIMILARITY = 0.2
-SBERT_MIN_SIMILARITY = 0.35
+MIN_SIMILARITY = 0.2           # RIDGE index default (its rule threshold and fallback are separate)
+SBERT_MIN_SIMILARITY = 0.35    # legacy value, kept for callers that pass it explicitly
+# Wild/Multilingual pick the best rule for every chunk (paper); the idle threshold is only the papers' optional
+# low-similarity fallback. TF-IDF: idle only when no rule shares a content word (cosine 0). Sentence-BERT: idle
+# below a low cosine that unrelated or non-English text stays under while ordinary conversational lines pass.
+POSE_TFIDF_FLOOR = 1e-6
+POSE_SBERT_FLOOR = 0.15  # MiniLM: default application lines score 0.16-0.43 against BEAT rules, gibberish 0.10-0.12
 AUTOMATIC_PHRASE_WORDS = 5
 AUTOMATIC_PERCENTILE = 80.0
 POSE_CHUNK_WORDS = 6
@@ -212,10 +221,43 @@ def _dependency_files(mode):
     return files
 
 
+SBERT_NAME = "all-MiniLM-L6-v2"
+SBERT_ENV = ("BEAT_SBERT_MODEL", "SBERT_MODEL")       # the paper-method scripts read SBERT_MODEL
+GLOVE_ENV = ("BEAT_GLOVE_PATH", "GLOVE_PATH")
+GLOVE_NAMES = ("glove.6B.300d.txt", "glove.840B.300d.txt", "glove.42B.300d.txt")
+
+
+def _models_dir():
+    """``<repo>/models`` for a vendored copy in ``<repo>/scripts`` (the paper-method scripts' default location)."""
+    return Path(__file__).resolve().parent.parent / "models"
+
+
 def sbert_setting(explicit=None):
-    """Local Sentence-BERT folder from the argument or ``BEAT_SBERT_MODEL`` (None: TF-IDF fallback)."""
-    value = explicit if explicit else os.environ.get("BEAT_SBERT_MODEL")
-    return str(value) if value else None
+    """Local Sentence-BERT folder: the argument, ``BEAT_SBERT_MODEL``, ``SBERT_MODEL`` or ``<repo>/models/<name>``.
+
+    None means the labelled TF-IDF fallback. Nothing is downloaded.
+    """
+    if explicit:
+        return str(explicit)
+    for name in SBERT_ENV:
+        if os.environ.get(name):
+            return os.environ[name]
+    local = _models_dir() / SBERT_NAME
+    return str(local) if local.is_dir() else None
+
+
+def glove_setting():
+    """Local GloVe text file: ``BEAT_GLOVE_PATH``, ``GLOVE_PATH`` or a standard file name in ``<repo>/models``."""
+    for name in GLOVE_ENV:
+        value = os.environ.get(name)
+        if value and Path(value).is_file():
+            return value
+    return next((str(_models_dir() / n) for n in GLOVE_NAMES if (_models_dir() / n).is_file()), None)
+
+
+def model_name(path):
+    """Report a local model by its folder or file name, never by its absolute path."""
+    return Path(str(path)).name or str(path)
 
 
 def cache_key(mode, bank_path, *, epochs=60, seed=7, strong_rules_path=None, sbert=None):
@@ -228,7 +270,8 @@ def cache_key(mode, bank_path, *, epochs=60, seed=7, strong_rules_path=None, sbe
     digest.update(_sha256(bank_path).encode())
     rules = _sha256(strong_rules_path) if strong_rules_path else None
     digest.update(json.dumps({"mode": mode, "epochs": int(epochs), "seed": int(seed), "rules": rules,
-                              "sbert": sbert_setting(sbert)}, sort_keys=True).encode())
+                              "sbert": sbert_setting(sbert),
+                              "glove": glove_setting() if mode == "automatic" else None}, sort_keys=True).encode())
     return digest.hexdigest()
 
 
@@ -361,42 +404,76 @@ class TfidfText:
         known = content & self.lookup.keys()
         return len(known) / max(1, len(content)), known
 
+    vocabulary_coverage = coverage
+
     def to_dict(self):
         return {"kind": "tfidf", "vocab": self.vocab, "idf": [round(float(v), 6) for v in self.idf],
                 "note": self.note}
 
 
 _SBERT_MODELS: dict = {}
+# Lazily loaded models and vector caches are shared by the demo server's request threads.
+_MODEL_LOCK = threading.RLock()
+_ENCODE_LOCK = threading.Lock()
+
+
+def _load_sentence_transformer(path):
+    from sentence_transformers import SentenceTransformer
+    return SentenceTransformer(path, device="cpu")
 
 
 class SbertText:
     kind = "sbert"
 
-    def __init__(self, path):
+    def __init__(self, path, name=None):
         self.path = str(path)
+        self.name = name or model_name(path)
 
     @property
     def label(self):
-        return f"sentence-bert ({self.path})"
+        return f"sentence-bert ({self.name})"
 
     def model(self):
-        if self.path not in _SBERT_MODELS:
-            from sentence_transformers import SentenceTransformer
-            if not Path(self.path).is_dir():
-                raise FileNotFoundError(f"Sentence-BERT folder not found: {self.path}")
-            _SBERT_MODELS[self.path] = SentenceTransformer(self.path, device="cpu")
-        return _SBERT_MODELS[self.path]
+        # Double-checked under a module lock: two first requests on a fresh server must not construct the
+        # model concurrently (torch then fails with "Cannot copy out of meta tensor"), and only a fully
+        # loaded model is ever cached, so a failed load is retried rather than poisoning the process.
+        model = _SBERT_MODELS.get(self.path)
+        if model is None:
+            with _MODEL_LOCK:
+                model = _SBERT_MODELS.get(self.path)
+                if model is None:
+                    if not Path(self.path).is_dir():
+                        raise FileNotFoundError(f"Sentence-BERT folder not found: {model_name(self.path)}")
+                    model = _load_sentence_transformer(self.path)
+                    _SBERT_MODELS[self.path] = model
+        return model
 
     def encode(self, texts):
         texts = [texts] if isinstance(texts, str) else list(texts)
-        return np.asarray(self.model().encode(texts, normalize_embeddings=True), np.float32).reshape(len(texts), -1)
+        model = self.model()
+        with _ENCODE_LOCK:  # one forward pass at a time: the shared model is not documented as thread-safe
+            vectors = model.encode(texts, normalize_embeddings=True)
+        return np.asarray(vectors, np.float32).reshape(len(texts), -1)
 
     def coverage(self, text):
         content = _content(text)
         return (1.0 if content else 0.0), content
 
+    def known(self, word):
+        """A word is in vocabulary when it (or a part around an apostrophe) is a whole word-piece of the model."""
+        vocab = getattr(self.model().tokenizer, "vocab", None) or {}
+        parts = [p for p in str(word).casefold().split("'") if len(p) > 1 or p.isdigit()]
+        return any(p in vocab and p not in STOPWORDS for p in parts)
+
+    def vocabulary_coverage(self, text):
+        """Share of content words in the model's word-piece vocabulary (true OOV text scores 0)."""
+        content = _content(text)
+        known = {w for w in content if self.known(w)}
+        return len(known) / max(1, len(content)), known
+
     def to_dict(self):
-        return {"kind": "sbert", "path": self.path}
+        # The index names the model only; the local folder is resolved again at query time (no absolute paths).
+        return {"kind": "sbert", "model": self.name}
 
 
 def fit_text_encoder(texts, sbert=None):
@@ -408,25 +485,28 @@ def fit_text_encoder(texts, sbert=None):
             encoder.encode(["hello"])
             return encoder
         except Exception as exc:  # optional dependency or missing folder: label the fallback honestly
-            return TfidfText.fit(texts, note=f"Sentence-BERT at {path} unavailable: {type(exc).__name__}")
+            return TfidfText.fit(texts, note=f"Sentence-BERT {model_name(path)} unavailable: {type(exc).__name__}")
     return TfidfText.fit(texts)
 
 
 def text_encoder(spec):
     if spec["kind"] == "sbert":
-        return SbertText(spec["path"])
+        path = spec.get("path") or sbert_setting()
+        if not path:
+            raise ValueError(f"Sentence-BERT model {spec.get('model', SBERT_NAME)} used at prepare time is not "
+                             "configured now; set BEAT_SBERT_MODEL (or SBERT_MODEL) or rerun prepare_beat_demo.py")
+        return SbertText(path, spec.get("model"))
     return TfidfText(spec["vocab"], spec["idf"], spec.get("note"))
 
 
 def encoder_label(info):
     """Human-readable text-matching route of a prepared index (for the library endpoint)."""
     spec = info.get("text_encoder") or {}
-    if spec.get("kind") in {"tfidf", "sbert"}:
+    if spec.get("kind") == "sbert":
+        return f"sentence-bert ({spec.get('model') or model_name(spec.get('path', SBERT_NAME))})"
+    if spec.get("kind") == "tfidf":
         return text_encoder(spec).label
-    path = os.environ.get("BEAT_GLOVE_PATH")
-    if path and Path(path).is_file():
-        return f"glove ({path})"
-    return "bag-of-words fallback (summed one-hot IDF vectors; set BEAT_GLOVE_PATH for GloVe)"
+    return _automatic_vector_label()
 
 
 # ----------------------------------------------------------------------------
@@ -436,12 +516,17 @@ AUTOMATIC_JOINTS = ("Neck", "LeftShoulder", "LeftArm", "LeftForeArm", "LeftHand"
                     "RightShoulder", "RightArm", "RightForeArm", "RightHand")
 
 
-def _automatic_inputs(bank, base):
-    """Frontal 2D arm/hand poses with the dataset mean pose removed, for core's frame cosine.
+def _automatic_inputs(bank):
+    """Frontal 2D arm/hand poses, standardised per coordinate, for core's frame cosine.
 
-    Raw neck-relative poses share a large static component (every bank gesture
-    scores ~0.96 against every window), which collapses Algorithm 1 onto one
-    gesture; removing the mean pose keeps the paper's criterion discriminative.
+    The gesture bank is every bank clip. Raw neck-relative poses share a large
+    static component (every bank gesture scores ~0.96 against every window), and
+    after removing only the dataset mean pose the coordinates with the largest
+    spread (raised hands) still dominate the cosine, so Algorithm 1 piles its
+    rules onto one or two gestures. Removing the dataset mean pose and dividing
+    by the per-coordinate standard deviation keeps the paper's criterion (mean
+    frame cosine above a threshold, random pick among passing gestures) and
+    spreads the rules over the bank.
     """
     from automatic_text_to_gesture.core import Clip
     names = bank["joint_names"]
@@ -451,10 +536,13 @@ def _automatic_inputs(bank, base):
         index = _feature_index(names)
     neck = _sub_index(index, names, "Neck") or 0
     raw = lambda positions: np.asarray(positions, np.float32)[:, index, :2]  # frontal camera: X, Y
-    items = [c for c in bank["clips"] if str(c["id"]) in base] + list(bank["associations"])
-    mean = np.concatenate([raw(c["positions"]) - raw(c["positions"])[:, neck:neck + 1] for c in items]).mean(0)
-    view = lambda positions: (raw(positions) - raw(positions)[:, neck:neck + 1]) - mean
-    gestures = {str(c["id"]): view(c["positions"]) for c in bank["clips"] if str(c["id"]) in base}
+    rel = lambda positions: raw(positions) - raw(positions)[:, neck:neck + 1]
+    stacked = np.concatenate([rel(c["positions"]) for c in list(bank["clips"]) + list(bank["associations"])])
+    mean, std = stacked.mean(0), stacked.std(0)
+    std[neck] = 1.0  # the neck is the origin (all zeros); keep it zero after scaling
+    std = np.maximum(std, 1e-3)
+    view = lambda positions: (rel(positions) - mean) / std
+    gestures = {str(c["id"]): view(c["positions"]) for c in bank["clips"]}
     clips = []
     for item in bank["associations"]:
         words = _timed_words(item)
@@ -463,10 +551,10 @@ def _automatic_inputs(bank, base):
     return gestures, clips, neck
 
 
-def _automatic_mine(bank, base, *, seed, threshold=None, percentile=None):
-    """Algorithm 1 over every association window through core.mine_clips."""
+def _automatic_mine(bank, base=None, *, seed, threshold=None, percentile=None):
+    """Algorithm 1 over every association window through core.mine_clips, against every bank gesture."""
     from automatic_text_to_gesture.core import mine_clips
-    gestures, clips, neck = _automatic_inputs(bank, base)
+    gestures, clips, neck = _automatic_inputs(bank)
     if not clips:
         raise ValueError("Automatic mining needs association windows with aligned words")
     rules, report = mine_clips(clips, gestures, threshold=threshold, seed=int(seed),
@@ -511,36 +599,69 @@ def _prepare_automatic(bank, base, seed, **_):
             "calibration": {k: v for k, v in report.items() if k not in {"clips", "grid"}},
             "threshold_rule": f"p{AUTOMATIC_PERCENTILE:g} of window-by-gesture frame cosines rounded down to 0.01 "
                               "(core.threshold_from_percentile; neck-normalised frontal arm/hand XY, "
-                              "dataset mean pose removed)",
-            "algorithm": "Automatic Text-to-Gesture (automatic_text_to_gesture.core): padding-aware GestureBank, "
-                         "mine_clips at stride = gesture length with seeded random pick among passing gestures, "
-                         "hybrid manual/auto map retrieval over 5-word chunks",
+                              "standardised per coordinate with the dataset mean and spread)",
+            "algorithm": "Automatic Text-to-Gesture (automatic_text_to_gesture.core): padding-aware GestureBank over "
+                         "every bank clip, mine_clips at stride = gesture length with seeded random pick among "
+                         "passing gestures, hybrid manual/auto map retrieval over 5-word chunks (Algorithm 2: best "
+                         "rule whenever a chunk shares vocabulary, idle otherwise)",
             "metrics": _automatic_metrics(rules, report), "training_pairs": report.get("windows", 0),
-            "playback_ids": list(base), "text_encoder": {"kind": "bag_of_words"}}
+            "playback_ids": [str(c["id"]) for c in bank["clips"]], "text_encoder": {"kind": "bag_of_words"}}
 
 
 _GLOVE: dict = {}
+_WORD_VECTORS: dict = {}
+BOW_LABEL = "bag-of-words fallback (summed one-hot IDF vectors; set BEAT_GLOVE_PATH for GloVe)"
+
+
+def _automatic_vector_label():
+    glove, sbert = glove_setting(), sbert_setting()
+    if glove:
+        return f"glove ({model_name(glove)})"
+    if sbert:
+        return (f"sentence-bert word vectors ({model_name(sbert)}; each word encoded alone and summed as in "
+                "Algorithm 2; set BEAT_GLOVE_PATH for the paper's GloVe)")
+    return BOW_LABEL
 
 
 def _automatic_vectors(rules, text):
-    """GloVe vectors when BEAT_GLOVE_PATH names a local file, else one-hot IDF vectors over rule content words."""
-    path = os.environ.get("BEAT_GLOVE_PATH")
-    if path and Path(path).is_file():
-        from automatic_text_to_gesture.core import TOKEN, load_glove
-        loaded, absent = _GLOVE.setdefault(path, ({}, set()))
-        required = {w for r in rules for w in TOKEN.findall(r.phrase.lower())} | set(TOKEN.findall(text.lower()))
-        missing = required - loaded.keys() - absent
-        if missing:
-            found = load_glove(path, missing)
-            loaded.update(found); absent.update(missing - found.keys())
-        return loaded, f"glove ({path})"
+    """Word vectors for Algorithm 2's summed-vector phrase match.
+
+    GloVe when a local file is configured (the paper's vectors); otherwise, with a
+    local Sentence-BERT, each word is encoded on its own and used as its word
+    vector; otherwise one-hot IDF vectors over the rule content words.
+    """
+    from automatic_text_to_gesture.core import TOKEN, load_glove
+    required = {w for r in rules for w in TOKEN.findall(r.phrase.lower())} | set(TOKEN.findall(text.lower()))
+    glove = glove_setting()
+    if glove:
+        with _MODEL_LOCK:
+            loaded, absent = _GLOVE.setdefault(glove, ({}, set()))
+            missing = required - loaded.keys() - absent
+            if missing:
+                found = load_glove(glove, missing)
+                loaded.update(found); absent.update(missing - found.keys())
+            return {w: loaded[w] for w in required if w in loaded}, _automatic_vector_label()
+    sbert = sbert_setting()
+    if sbert:
+        try:
+            encoder = SbertText(sbert)
+            with _MODEL_LOCK:
+                cache = _WORD_VECTORS.setdefault(sbert, {})
+                # Only content words in the model's word-piece vocabulary get a vector, so true OOV text
+                # (gibberish, untranslated non-Latin script) still idles as in Algorithm 2.
+                missing = sorted(w for w in required - cache.keys() if w not in STOPWORDS and encoder.known(w))
+                if missing:
+                    cache.update(zip(missing, encoder.encode(missing)))
+                return {w: cache[w] for w in required if w in cache}, _automatic_vector_label()
+        except Exception:  # optional dependency or unreadable folder: fall back to the labelled bag of words
+            pass
     encoder = TfidfText.fit([r.phrase for r in rules])
     content = [i for i, w in enumerate(encoder.vocab) if w not in STOPWORDS]
     vectors = {}
     for k, i in enumerate(content):
         v = np.zeros(len(content), np.float32); v[k] = encoder.idf[i]
         vectors[encoder.vocab[i]] = v
-    return vectors, "bag-of-words fallback (summed one-hot IDF vectors; set BEAT_GLOVE_PATH for GloVe)"
+    return vectors, BOW_LABEL
 
 
 def _query_automatic(text, params, info, bank, floor, seed):
@@ -552,7 +673,7 @@ def _query_automatic(text, params, info, bank, floor, seed):
     if abs(threshold - float(info.get("default_threshold", threshold))) < 5e-4 and seed == info["seed"]:
         mined, metrics = [r for r in rules if r["route"] == "mined_pose_rule"], dict(info.get("metrics", {}))
     else:
-        mined, report = _automatic_mine(bank, base, seed=seed, threshold=threshold)
+        mined, report = _automatic_mine(bank, seed=seed, threshold=threshold)
         metrics = _automatic_metrics(mined, report)
     patterns = {}
     for r in seeds:
@@ -687,7 +808,21 @@ def _pose_rule_metrics(rules, units, clusters):
             "distinct_matched_units": len(usage), "unit_count": len(units),
             "max_unit_share": round(max(usage.values()) / max(1, len(rules)), 4) if usage else 0.0,
             "rule_routes": {"learned_pose_rule": len(rules)},
+            "rule_match": "nearest unit by cosine of per-modality mean-centred GestureCLR latents",
             "cluster_sizes": {k: len(v) for k, v in clusters.items()}}
+
+
+def _centred(latents):
+    """Mean-centre unit-norm latents of one modality and renormalise.
+
+    The demo-budget GestureCLR latents are anisotropic (unit latents share a
+    mean pairwise cosine near 0.8), so a plain nearest-unit match sends most
+    wild sequences to one hub unit. Removing each modality's mean keeps the
+    papers' nearest-unit criterion (cosine argmax) and spreads the rules.
+    """
+    z = np.asarray(latents, np.float32)
+    z = z - z.mean(0, keepdims=True)
+    return z / np.linalg.norm(z, axis=1, keepdims=True).clip(1e-8)
 
 
 def _threads():
@@ -753,10 +888,11 @@ def _prepare_wild(bank, bank_path, output, epochs, seed, sbert, origin_sha, **_)
     w2p, _ = _pad(w2)
     wz = encode(model.pose2d, norm.apply(w2p.reshape(len(w2p), w2p.shape[1], -1), 2, wmask), wmask)
     mz = encode(model.motion3d, norm.apply(w3p.reshape(len(w3p), w3p.shape[1], -1), 3, wmask), wmask)
-    labels, _ = cluster_latents(uz, _cluster_count(units), seed=int(seed))
+    uc, wc = _centred(uz), _centred(wz)
+    labels, _ = cluster_latents(uc, _cluster_count(units), seed=int(seed))
     texts = [str(a["text"]) for a in mine]
     encoder = fit_text_encoder(texts, sbert)
-    rows = build_rules(encoder.encode(texts), texts, wz, uz, [u["id"] for u in units], labels)
+    rows = build_rules(encoder.encode(texts), texts, wc, uc, [u["id"] for u in units], labels)
     for row, item in zip(rows, mine):
         row.update(route="learned_pose_rule", score=round(row["pose_match"], 5),
                    source={"association_id": item["id"], **item.get("source", {})})
@@ -788,6 +924,12 @@ def _round(value, digits=4):
     return None if value is None or (isinstance(value, float) and math.isnan(value)) else round(float(value), digits)
 
 
+def _idle_reason(similarity, floor):
+    if similarity <= 1e-9:
+        return "no rule shares vocabulary with this chunk"
+    return f"best rule similarity {similarity:.3f} below the low-similarity fallback {floor:g}"
+
+
 def _query_wild(text, params, info, floor, seed):
     from wild_pose_matching.pipeline import retrieve
     encoder = text_encoder(info["text_encoder"])
@@ -800,9 +942,11 @@ def _query_wild(text, params, info, floor, seed):
     slots = []
     for row in rows:
         detail = {"similarity": round(row["similarity"], 5), "cluster_id": row["cluster_id"]}
+        if row["gesture_id"] != IDLE_ID and not encoder.vocabulary_coverage(row["text"])[1]:
+            row = dict(row, gesture_id=IDLE_ID, map="idle", reason="no in-vocabulary content word")
         if row["gesture_id"] == IDLE_ID:
-            slots.append((row["text"], None, {"kind": "idle", "reason": "below similarity floor", "floor": floor},
-                          detail, 0.0))
+            reason = row.get("reason") or _idle_reason(row["similarity"], floor)
+            slots.append((row["text"], None, {"kind": "idle", "reason": reason, "floor": floor}, detail, 0.0))
             continue
         rule = by_text.get(row.get("rule_text"), {})
         slots.append((row["text"], row["gesture_id"],
@@ -877,11 +1021,12 @@ def _prepare_multilingual(bank, bank_path, output, epochs, seed, sbert, origin_s
     uz = cli.encode_batches(model.motion3d, u3, ulen)
     wz = cli.encode_batches(model.pose2d, w2f, wlen)
     mz = cli.encode_batches(model.motion3d, w3f, wlen)
-    labels, _ = bisect(uz, _cluster_count(units), int(seed))
+    uc, wc = _centred(uz), _centred(wz)
+    labels, _ = bisect(uc, _cluster_count(units), int(seed))
     texts = [str(a["text"]) for a in mine]
     encoder = fit_text_encoder(texts, sbert)
     embeddings = encoder.encode(texts)
-    sims = wz @ uz.T
+    sims = wc @ uc.T
     nearest = sims.argmax(1)
     rows = [{"english_text": t, "text": t, "text_embedding": e.tolist(), "cluster_id": int(labels[j]),
              "source_gesture_id": units[j]["id"], "gesture_id": units[j]["id"],
@@ -921,6 +1066,7 @@ class _Translator:
         self.table = {str(k).strip(): v for k, v in (table or {}).items()}
         self.dictionary = DictTranslator(self.table)
         self.fallback, self.label, self.used = fallback, label, set()
+        self.missing = {}  # source chunk -> why no English text was available
 
     def translate(self, text, source_language, target_language="en"):
         key = str(text).strip()
@@ -928,11 +1074,21 @@ class _Translator:
             out = self.dictionary.translate(key, source_language, target_language)
             self.used.add("dictionary" if key in self.table else "identity")
             return out
-        except ValueError:
-            if self.fallback is None:
-                raise
-        self.used.add(self.label)
-        return self.fallback.translate(text, source_language, target_language)
+        except ValueError as exc:
+            reason = str(exc)
+        if self.fallback is not None:
+            try:
+                out = self.fallback.translate(text, source_language, target_language)
+                self.used.add(self.label)
+                return out
+            except Exception as exc:  # unreachable or failing MT service: idle with a note, never an error
+                reason = f"{self.label} failed ({type(exc).__name__}: {exc})"
+        # No translation: the chunk retrieves nothing and plays an explicit idle slot with this note.
+        detail = f" ({reason})" if self.fallback is not None else ""
+        self.missing[key] = (f"no {source_language}->{target_language} translation for this text{detail}; add it to "
+                             "examples/beat-translations.json, send english_text, or set BEAT_TRANSLATOR=http|local")
+        self.used.add("untranslated (idle)")
+        return ""
 
 
 def _translator(table):
@@ -961,25 +1117,55 @@ def _query_multilingual(text, params, info, floor, seed):
         # An explicit whole-line translation of long input: split and retrieve on the English side.
         text, language = str(translator.table[text.strip()]), "en"
         translator.used.add("dictionary (whole line)")
-    out = multilingual_retrieve(text, language, translator, info["rules"], encoder.encode, clusters, seed,
+    memo = {}
+
+    def encode(texts):
+        texts = list(texts)
+        todo = [t for t in dict.fromkeys(texts) if t not in memo]
+        if todo:
+            memo.update(zip(todo, np.asarray(encoder.encode(todo), np.float32)))
+        return np.stack([memo[t] for t in texts])
+
+    out = multilingual_retrieve(text, language, translator, info["rules"], encode, clusters, seed,
                                 min_similarity=floor, idle_id=IDLE_ID, max_words=30)
     by_text = {}
     for r in info["rules"]:
         by_text.setdefault(r["text"], r)
+    matrix = np.asarray([r["text_embedding"] for r in info["rules"]], np.float32)
+    matrix /= np.linalg.norm(matrix, axis=1, keepdims=True).clip(1e-8)
+
+    def _best_rule_text(_, g):
+        # The package returns only the cluster; report which rule it matched (same argmax as retrieve()).
+        q = memo.get(g["english_text"])
+        return None if q is None else info["rules"][int((matrix @ q).argmax())]["text"]
     slots = []
-    for g in out["gestures"]:
-        detail = {"similarity": round(g["similarity"], 5), "cluster_id": g["cluster_id"],
-                  "chunk_index": g["chunk_index"], "blend_frames": g["blend_frames"]}
-        if g["idle"]:
-            slots.append((g["english_text"], None, {"kind": "idle", "reason": "below similarity floor", "floor": floor},
-                          detail, 0.0))
-        else:
-            slots.append((g["english_text"], g["gesture_id"],
-                          {"cluster_id": g["cluster_id"], "sampling": "numpy default_rng(seed + chunk) choice "
-                           "within the matched cluster"}, {**detail, "route": "learned_pose_rule"}, g["similarity"]))
+    for chunk in out["chunks"]:
+        note = translator.missing.get(str(chunk["source_text"]).strip())
+        if note is not None and not chunk["gestures"]:
+            # Untranslated source text: an explicit idle slot that carries the note (no error, no guess).
+            slots.append((chunk["source_text"], None, {"kind": "idle", "reason": note},
+                          {"similarity": 0.0, "chunk_index": chunk["index"], "untranslated": True}, 0.0))
+            continue
+        for g in chunk["gestures"]:
+            detail = {"similarity": round(g["similarity"], 5), "cluster_id": g["cluster_id"],
+                      "chunk_index": g["chunk_index"], "blend_frames": g["blend_frames"]}
+            oov = not g["idle"] and not encoder.vocabulary_coverage(g["english_text"])[1]
+            if g["idle"] or oov:
+                reason = "no in-vocabulary content word" if oov else _idle_reason(g["similarity"], floor)
+                slots.append((g["english_text"], None, {"kind": "idle", "reason": reason, "floor": floor},
+                              dict(detail, cluster_id=None), 0.0))
+            else:
+                rule = by_text.get(_best_rule_text(info, g), {})
+                slots.append((g["english_text"], g["gesture_id"],
+                              {"cluster_id": g["cluster_id"], "sampling": "numpy default_rng(seed + chunk) choice "
+                               "within the matched cluster", "matched_gesture_id": rule.get("gesture_id"),
+                               "rule_text": rule.get("text")},
+                              {**detail, "route": "learned_pose_rule"}, g["similarity"]))
     trace = {"retrieval_text": out["english_text"], "tts_text": out["tts_text"],
              "chunks": [{k: c[k] for k in ("index", "source_text", "english_text", "tts_text")} for c in out["chunks"]],
              "translation": ", ".join(sorted(translator.used)) or None, "source_text": source}
+    if translator.missing:
+        trace["translation_note"] = next(iter(translator.missing.values()))
     return slots, {"seed": seed, "sentence_chunks": len(out["chunks"])}, encoder.label, trace
 
 
@@ -1146,11 +1332,16 @@ def _ridge_model(artifact):
     from ridge_gesture.model import load_checkpoint
     path = Path(artifact) / "ridge-model.pt"
     stamp = (str(path), path.stat().st_mtime_ns)
-    if stamp not in _RIDGE_CACHE:
-        _RIDGE_CACHE.clear()
-        _RIDGE_CACHE[stamp] = load_checkpoint(path)[0]
-        torch.set_num_threads(max(1, min(4, os.cpu_count() or 1)))
-    return _RIDGE_CACHE[stamp]
+    model = _RIDGE_CACHE.get(stamp)
+    if model is None:
+        with _MODEL_LOCK:  # same double-checked pattern as the Sentence-BERT loader
+            model = _RIDGE_CACHE.get(stamp)
+            if model is None:
+                model = load_checkpoint(path)[0]
+                torch.set_num_threads(max(1, min(4, os.cpu_count() or 1)))
+                _RIDGE_CACHE.clear()
+                _RIDGE_CACHE[stamp] = model
+    return model
 
 
 def _query_ridge(text, params, info, artifact, floor):
@@ -1209,6 +1400,15 @@ def _query_ridge(text, params, info, artifact, floor):
 # ----------------------------------------------------------------------------
 # Prepare / query entry points
 
+def _default_floor(mode, encoder):
+    """Default idle threshold per mode (a request's ``min_similarity`` overrides it)."""
+    if mode == "automatic":
+        return None
+    if mode in {"wild", "multilingual"}:
+        return POSE_SBERT_FLOOR if encoder.get("kind") == "sbert" else POSE_TFIDF_FLOOR
+    return SBERT_MIN_SIMILARITY if encoder.get("kind") == "sbert" else MIN_SIMILARITY
+
+
 def prepare(bank_path, output_dir, mode, *, epochs=60, seed=7, strong_rules_path=None, sbert=None, **_):
     """Prepare a local, mode-specific retrieval index from an ignored BEAT bank."""
     if mode not in MODES:
@@ -1247,7 +1447,7 @@ def prepare(bank_path, output_dir, mode, *, epochs=60, seed=7, strong_rules_path
             "data_label": "local BEAT-derived public-data demo; fitted locally",
             "training_pairs": len(bank["associations"]), "seed_pairs": 3, "bank_count": len(playback_ids),
             "seed": int(seed), "epochs": int(epochs),
-            "min_similarity": SBERT_MIN_SIMILARITY if encoder.get("kind") == "sbert" else MIN_SIMILARITY,
+            "min_similarity": _default_floor(mode, encoder),
             "bank_provenance": bank.get("provenance"), **result}
     info["prepare_seconds"] = round(time.perf_counter() - started, 2)
     index = output / "index.json"
@@ -1262,40 +1462,49 @@ def prepare(bank_path, output_dir, mode, *, epochs=60, seed=7, strong_rules_path
 
 def _suggest(mode, info, artifact, bank):
     """Queries that exercise the fitted method, verified by running them through ``query``."""
-    def routes(text):
+    def slots(text):
         try:
-            return [s["route"] for s in query(text, {}, mode, artifact)["slots"]]
+            return query(text, {}, mode, artifact)["slots"]
         except ValueError:
             return []
 
-    candidates, wanted = [], set()
+    candidates = []
     if mode == "automatic":
         base = set(info["base_ids"])
-        candidates = [(_seed_phrases(c)[0], {"seed_rule"}) for c in bank["clips"] if str(c["id"]) in base]
+        candidates = [(_seed_phrases(c)[0], {"seed_rule"}, None) for c in bank["clips"] if str(c["id"]) in base]
         seen = set()
         for r in info["rules"]:
             if r["route"] == "mined_pose_rule" and r["gesture_id"] not in seen and len(WORDS.findall(r["text"])) >= 3:
-                seen.add(r["gesture_id"]); candidates.append((r["text"], {"mined_pose_rule"}))
+                seen.add(r["gesture_id"]); candidates.append((r["text"], {"mined_pose_rule"}, None))
     elif mode in {"wild", "multilingual"}:
+        # One candidate per cluster, best pose match first; a suggestion must retrieve through its own rule.
         seen = set()
         for r in sorted(info["rules"], key=lambda r: -float(r.get("score", 0))):
             words = WORDS.findall(r["text"])[:POSE_CHUNK_WORDS]
             if len(words) >= 3 and r["cluster_id"] not in seen:
-                seen.add(r["cluster_id"]); candidates.append((" ".join(words), {"learned_pose_rule"}))
+                seen.add(r["cluster_id"]); candidates.append((" ".join(words), {"learned_pose_rule"}, r))
     else:
-        candidates = [(r["phrase"], {"strong_rule", "heuristic_rule"}) for r in info["strong_rules"][:2]]
+        candidates = [(r["phrase"], {"strong_rule", "heuristic_rule"}, None) for r in info["strong_rules"][:2]]
         pool = bank["associations"]
         for a in pool[1::max(1, len(pool) // 6)]:
-            candidates.append((" ".join(WORDS.findall(a["text"])[:10]), {"trained_text_motion_fallback"}))
-    examples = []
-    for text, accepted in candidates:
-        found = set(routes(text)) if text and text not in examples else set()
-        if found & accepted and "idle_no_match" not in found:
-            examples.append(text)
-        if len(examples) >= (3 if mode != "automatic" else 5):
+            candidates.append((" ".join(WORDS.findall(a["text"])[:10]), {"trained_text_motion_fallback"}, None))
+    examples, limit = [], (5 if mode in {"automatic", "wild", "multilingual"} else 3)
+    for text, accepted, rule in candidates:
+        if not text or text in examples:
+            continue
+        found = slots(text)
+        routes = {s["route"] for s in found}
+        if not found or not routes & accepted or "idle_no_match" in routes:
+            continue
+        if rule is not None and any(s.get("rule_source", {}).get("rule_text") not in (None, rule["text"])
+                                    for s in found):
+            continue  # the chunk matched another rule: the suggestion would not show its own association
+        examples.append(text)
+        if len(examples) >= limit:
             break
-    if len(examples) >= 3:
-        examples.append(". ".join(examples[:3]))
+    combined = ". ".join(examples[:3])
+    if len(examples) >= 3 and all(s["route"] != "idle_no_match" for s in slots(combined) or [{"route": "idle_no_match"}]):
+        examples.append(combined)
     return examples
 
 
@@ -1334,7 +1543,14 @@ def query(text, params, mode, artifact_dir):
     if digest != info["bank_sha256"]:
         raise ValueError("Prepared BEAT bank is missing or has changed; run prepare again")
     by_id = {str(c["id"]): c for c in bank["clips"]}
-    floor = _float_param(params, "min_similarity", info.get("min_similarity", MIN_SIMILARITY))
+    default_floor = info.get("min_similarity", MIN_SIMILARITY)
+    requested = params.get("min_similarity")
+    if isinstance(requested, list):
+        requested = requested[0] if requested else None
+    if default_floor is None and (requested is None or (isinstance(requested, str) and not requested.strip())):
+        floor = None  # Automatic (Algorithm 2): no similarity floor; only chunks without shared vocabulary idle
+    else:
+        floor = _float_param(params, "min_similarity", default_floor)
     seed = int(_float_param(params, "seed", info["seed"], 0, 2 ** 31))
     trace_extra = {}
     if mode == "automatic":

@@ -1,4 +1,4 @@
-import {MotionSequence} from './gesture-library.js?v=20261006-paper1';
+import {MotionSequence} from './gesture-library.js?v=20261006-paper2';
 
 // A repository-local bridge: the server selects the fixed retrieval mode and
 // supplies only clips prepared in this repository's ignored outputs directory.
@@ -15,5 +15,6 @@ export async function prepareApplicationMotion(stage,text,{actor=null,mode='appl
 export function gestureSummary(data){
   const ids=(data?.slots||[]).map(slot=>slot.gesture_id||slot.id).filter(Boolean);
   const route=data?.trace?.route||data?.trace?.routes?.join(' → ')||data?.route||'local recorded motion';
-  return `${route}: ${ids.join(' → ')||'selected clip'}`;
+  const note=data?.trace?.translation_note?` (${data.trace.translation_note})`:'';
+  return `${route}: ${ids.join(' → ')||'selected clip'}${note}`;
 }

@@ -2,6 +2,7 @@
 from __future__ import annotations
 import argparse
 import json
+import os
 from pathlib import Path
 import sys
 from urllib.parse import parse_qs, urlsplit
@@ -13,6 +14,27 @@ import beat_methods
 
 BUILD_DEFAULTS = {'processed': None, 'raw_root': None, 'speakers': None, 'takes': None,
                   'max_takes_per_speaker': 1, 'count': 9, 'min_energy': 0.08}
+# With a local processed OmniMo BEAT collection (BEAT_PROCESSED_ROOT) the unflagged default bank uses more
+# speakers and takes: speaker 1 feeds the bank, the others become disjoint train/wild association pools.
+PROCESSED_DEFAULT = {'speakers': '1,2,3,4,5,6', 'max_takes_per_speaker': 2}
+ENV_PROCESSED = 'BEAT_PROCESSED_ROOT'
+
+
+def default_selection():
+    """Bank selection for an unflagged run: a larger processed selection when BEAT_PROCESSED_ROOT names a
+    local OmniMo collection, otherwise the multi-take public default of build_library (DEFAULT_TAKES)."""
+    options = dict(BUILD_DEFAULTS)
+    root = os.environ.get(ENV_PROCESSED)
+    if root and Path(root).is_dir() and any(Path(root).glob('*/meta.json')):
+        options.update(processed=root, **PROCESSED_DEFAULT)
+    return options
+
+
+def _legacy_default(settings):
+    """A bank written by an older builder from the former single-take public default (no selection flags)."""
+    return bool(settings) and not settings.get('processed') and not settings.get('raw_root') \
+        and not settings.get('speakers') and settings.get('takes') in ([], ['1_wayne_0_1_1'], None) \
+        and settings.get('count', 9) == 9 and settings.get('min_energy', 0.08) == 0.08
 
 
 def paths(repo_root, mode):
@@ -46,9 +68,12 @@ def setup(repo_root, mode, *, processed=None, raw_root=None, speakers=None, take
           count=9, min_energy=0.08, epochs=80, strong_rules=None, rebuild=False, seed=7, sbert=None):
     """Build (or reuse) the local bank, then prepare (or reuse) this mode's adapter.
 
-    The bank is rebuilt when selection flags differ from the cached bank's
-    build settings, or when an unflagged run finds a bank written by an older
-    builder (its stored selection is then rebuilt). The adapter is refit when
+    Without selection flags the default bank is used (``default_selection``: the
+    multi-take public default, or a larger processed selection when
+    BEAT_PROCESSED_ROOT is set); a bank built from explicit flags keeps its
+    selection (rebuilt by a newer builder), a bank from the former single-take
+    default is upgraded, and a hand-built bank without build settings is kept.
+    Selection flags that differ from the cached bank rebuild it. The adapter is refit when
     its cache key (bank hash, epochs, seed, strong rules, Sentence-BERT setting,
     adapter and paper-package code) changes.
     """
@@ -57,17 +82,22 @@ def setup(repo_root, mode, *, processed=None, raw_root=None, speakers=None, take
                'max_takes_per_speaker': max_takes_per_speaker, 'count': count, 'min_energy': min_energy}
     flagged = any(options[k] != v for k, v in BUILD_DEFAULTS.items())
     builder = _build_module()
-    wanted = _build_settings(options)
-    current = _read_settings(bank) if bank.exists() and not rebuild else None
-    if not flagged and current and current.get('builder') != builder.BUILDER:
-        # Same selection, newer builder: reuse the stored flags.
-        options.update({k: current.get(k, v) for k, v in BUILD_DEFAULTS.items()})
-        options['speakers'] = ','.join(options['speakers']) if isinstance(options['speakers'], list) else options['speakers']
-        options['takes'] = ','.join(options['takes']) if isinstance(options['takes'], list) else options['takes']
-        options = {k: (v or None) if k in {'speakers', 'takes', 'processed', 'raw_root'} else v for k, v in options.items()}
-        wanted = _build_settings(options)
-    stale = (flagged and current != wanted) or (
-        not flagged and current is not None and current.get('builder') != builder.BUILDER)
+    current = _read_settings(bank) if bank.exists() else None
+    default = False
+    if not flagged:
+        if current and not current.get('default') and not _legacy_default(current):
+            # A bank built from explicit flags: keep that selection (rebuilt by a newer builder if needed).
+            options.update({k: current.get(k, v) for k, v in BUILD_DEFAULTS.items()})
+            options['speakers'] = ','.join(options['speakers']) if isinstance(options['speakers'], list) else options['speakers']
+            options['takes'] = ','.join(options['takes']) if isinstance(options['takes'], list) else options['takes']
+            options = {k: (v or None) if k in {'speakers', 'takes', 'processed', 'raw_root'} else v for k, v in options.items()}
+        else:
+            # Default selection (public multi-take, or processed when BEAT_PROCESSED_ROOT is set); a bank from
+            # the former single-take default is upgraded.
+            options, default = default_selection(), True
+    wanted = dict(_build_settings(options), default=default)
+    # A bank without build settings was assembled by hand or by another tool: an unflagged run keeps it.
+    stale = current != wanted and not (not flagged and bank.exists() and current is None)
     if rebuild or not bank.exists() or stale:
         result = builder.build(Path(options['processed']) if options['processed'] else None, bank.parent/'source',
                                options['count'], speakers=options['speakers'], takes=options['takes'],
@@ -102,6 +132,34 @@ def _ready(repo_root, mode):
     return bank.exists() and (mode == 'wearable' or (artifact/'index.json').exists())
 
 
+_VERIFIED: dict = {}
+
+
+def _verified_translations(repo_root, mode):
+    """Source-language lines from examples/beat-translations.json that retrieve at least one recorded clip
+    and no idle slot with this repository's prepared adapter (checked once per index and table version)."""
+    translations = Path(repo_root)/'examples/beat-translations.json'
+    index = paths(repo_root, mode)[1]/'index.json'
+    if not translations.exists() or not index.exists():
+        return []
+    key = (str(translations.resolve()), translations.stat().st_mtime_ns, index.stat().st_mtime_ns)
+    if key not in _VERIFIED:
+        table = json.loads(translations.read_text(encoding='utf-8'))
+        good = []
+        for text in table:
+            if not any('가' <= c <= '힣' for c in text):
+                continue  # these suggestions demonstrate the Korean translation route
+            try:
+                result = query_application(repo_root, mode, text, {'source_language': 'ko'})
+            except ValueError:
+                continue
+            if result['slots'] and all(s['gesture_id'] != beat_methods.IDLE_ID for s in result['slots']):
+                good.append(text)
+        _VERIFIED.clear()
+        _VERIFIED[key] = good
+    return list(_VERIFIED[key])
+
+
 def library(repo_root, mode):
     bank, artifact = paths(repo_root, mode)
     if not _ready(repo_root, mode):
@@ -121,11 +179,12 @@ def library(repo_root, mode):
     else:
         examples = list(info.get('suggested_queries') or [c['text'] for c in clips[:3] if c['text']])
     if mode == 'multilingual':
-        translations = Path(repo_root)/'examples/beat-translations.json'
-        if translations.exists():
-            korean = list(json.loads(translations.read_text(encoding='utf-8')))
-            examples = korean[:1] + examples + korean[1:3]
-    metrics = {'seed_pairs': 3, 'bank_clips': len(clips), 'association_windows': len(data['associations']),
+        korean = _verified_translations(repo_root, mode)
+        examples = korean[:1] + examples + korean[1:3]
+    # playable_clips: what this mode can play; bank_clips: windows in the local bank (they differ when a mode
+    # plays a subset, e.g. the wearable seed clips, or derived units/spans).
+    metrics = {'seed_pairs': 3, 'playable_clips': len(clips), 'bank_clips': len(data['clips']),
+               'association_windows': len(data['associations']),
                'rules': len(info.get('rules', info.get('strong_rules', []))), 'training_loss': info.get('training_loss')}
     metrics.update({k: v for k, v in info.get('metrics', {}).items() if k != 'learned_rule_usage'})
     if mode == 'wearable':
@@ -174,7 +233,10 @@ def query_application(repo_root, mode, text, params=None):
     if mode == 'multilingual':
         # source_language (or language) selects the route; a caller-supplied
         # english_text is an explicit translation for this one line.
-        language = params.get('source_language') or params.get('language') or 'en'
+        # Callers that forward only the text (e.g. an application's own route) still take the translation
+        # route for Hangul input; an explicit source_language always wins.
+        detected = 'ko' if any('가' <= c <= '힣' for c in text) else 'en'
+        language = params.get('source_language') or params.get('language') or detected
         params['source_language'] = str(language)
         translations = Path(repo_root)/'examples/beat-translations.json'
         table = dict(json.loads(translations.read_text(encoding='utf-8'))) if translations.exists() else {}
