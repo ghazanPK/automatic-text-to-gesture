@@ -8,9 +8,9 @@ import numpy as np
 from export_playback import make_playback
 
 JOINTS=np.array([
-    [0,0,0],[0,1,0],[0,1.5,0],[-.35,1.25,0],[-.55,1.1,0],
-    [-.7,.9,0],[-.82,.75,0],[.35,1.25,0],[.55,1.1,0],
-    [.7,.9,0],[.82,.75,0]],np.float32)
+    [0,.95,0],[0,1.45,0],[0,1.68,0],[-.12,1.43,0],[-.25,1.43,0],
+    [-.32,1.10,.03],[-.36,.80,.06],[.12,1.43,0],[.25,1.43,0],
+    [.32,1.10,.03],[.36,.80,.06]],np.float32)
 
 
 def library():
@@ -21,13 +21,12 @@ def library():
             pose=JOINTS.copy()
             pulse=np.sin(np.pi*t)
             if name=="open_hands":
-                pose[[4,5,6],0]-=.15*pulse
-                pose[[9,10],0]+=.15*pulse
-                pose[[5,6,9,10],1]+=.28*pulse
+                for elbow,hand,sign in [(5,6,-1),(9,10,1)]:
+                    pose[elbow]=JOINTS[elbow]*(1-pulse)+np.array([sign*.46,1.13,.12])*pulse
+                    pose[hand]=JOINTS[hand]*(1-pulse)+np.array([sign*.75,1.34,.36])*pulse
             elif name=="point_right":
-                pose[[9,10],0]+=.45*pulse
-                pose[[9,10],1]+=.18*pulse
-                pose[[9,10],2]+=.2*pulse
+                pose[9]=JOINTS[9]*(1-pulse)+np.array([.53,1.38,.14])*pulse
+                pose[10]=JOINTS[10]*(1-pulse)+np.array([.88,1.44,.34])*pulse
             else:
                 pose[[6,10],1]+=.03*pulse
             frames.append(pose)
@@ -104,5 +103,6 @@ def query(mode,text,params):
                        "fallback_count":sum(row["source"]=="fallback" for row in sequence),
                        "trace":sequence})
     else:raise ValueError(mode)
+    result["axisSigns"]=[-1,1,1]  # authored camera coordinates -> anatomical avatar left/right
     result["data_label"]="Author-created example motion and illustrative vectors; no trained weights"
     return result

@@ -66,7 +66,7 @@ python -m pip install -e .
 python scripts/start_demo.py
 ```
 
-Open **http://127.0.0.1:8080/**. A starter query and motion clip load automatically. Click **Play**, or change the text and click **Retrieve motion**. The launcher selects the bundled inputs automatically; it also builds the small authored index for RAG demos. Avatar demos prepare their pinned Three.js modules on first launch, so that step needs internet access. Model weights and public datasets are optional for the starter workflow and are prepared separately for real-data use.
+Open **http://127.0.0.1:8080/**. A starter query and motion clip load automatically. Click **Play speech + gesture** to start both together, or change the text and click **Retrieve motion**. Stop cancels speech; scrubbing previews a pose without speaking. The launcher selects the bundled inputs automatically; it also builds the small authored index for RAG demos. Avatar demos prepare their pinned Three.js modules on first launch, so that step needs internet access. Model weights and public datasets are optional for the starter workflow and are prepared separately for real-data use.
 
 The 3D presentation uses shared Three.js avatar components and bundled fictional CC0 characters. The paper-specific algorithms and data adapters live in this repository.
 

@@ -163,12 +163,36 @@ function channelsFor(actor,t) {
   if (['sad','sadness'].includes(n)){f.browInnerUp=Math.max(f.browInnerUp||0,.5*i);f.mouthFrownLeft=Math.max(f.mouthFrownLeft||0,.5*i);f.mouthFrownRight=Math.max(f.mouthFrownRight||0,.5*i);}
   if (actor.speaking) {
     // This is an approximate animated speaking envelope, not phoneme alignment.
-    const pulse=.25+.45*Math.abs(Math.sin(t*12));
-    f.jawOpen=Math.max(f.jawOpen||0,pulse); f.mouthFunnel=Math.max(f.mouthFunnel||0,.22*Math.abs(Math.sin(t*7)));
-    f.viseme_aa=Math.max(f.viseme_aa||0,pulse*.55);
-    f.viseme_O=Math.max(f.viseme_O||0,.18*Math.abs(Math.sin(t*7)));
+    const pulse=clamp(actor.speechLevel ?? .08);
+    f.jawOpen=Math.max(f.jawOpen||0,pulse*.55);
+    f.viseme_aa=Math.max(f.viseme_aa||0,pulse*.3);
   }
   return f;
+}
+
+// World-space anatomical directions avoid assuming that imported skinning
+// bones share the local Euler axes of the old procedural stick character.
+export function applyGesturePose(rig,name='idle',t=0){
+  const n=String(name).toLowerCase(),beat=Math.sin(t*4),open=/welcome|open|explain|offer|reassure|present/.test(n),point=/point|touch|reach|turn|switch|warning/.test(n),wave=/wave|hello|greet/.test(n),think=/think|consider/.test(n),sit=/sit/.test(n),walk=/walk|move/.test(n);
+  const basis=rig.model.getWorldQuaternion(new THREE.Quaternion());
+  for(const [bone,bind] of rig.bind)bone.quaternion.copy(bind);
+  rig.model.updateMatrixWorld(true);
+  const aim=(parent,child,direction)=>{const bone=rig.bones.get(parent),end=rig.bones.get(child);if(bone&&end)aimBoneToward(bone,end,new THREE.Vector3(...direction).applyQuaternion(basis));};
+  for(const side of ['left','right']){
+    const sign=side==='left'?1:-1;
+    let upper=[sign*.18,-1,.05],lower=[sign*.06,-1,.12];
+    if(open){upper=[sign*.6,-.85,.18];lower=[sign*(.5+.15*beat),.15+.12*beat,.8];}
+    if((point||wave||think)&&side==='right'){
+      upper=think?[-.25,-.65,.65]:wave?[-.75,.35,.35]:[-.65,-.12,.8];
+      lower=think?[.12,.9,.2]:wave?[-.15,1,.15+.3*beat]:[-.7,.05+.08*beat,.8];
+    }
+    if(/beat/.test(n)&&side==='right'){upper=[-.3,-.8,.35];lower=[-.3,.15+.3*beat,.85];}
+    if(walk){upper=[sign*.12,-1,(side==='left'?1:-1)*.3*Math.sin(t*7)];lower=[sign*.06,-1,.1];}
+    aim(side+'arm',side+'forearm',upper);aim(side+'forearm',side+'hand',lower);
+    if(sit){aim(side+'upleg',side+'leg',[sign*.12,-.15,.9]);aim(side+'leg',side+'foot',[0,-1,.1]);}
+    else if(walk){aim(side+'upleg',side+'leg',[sign*.06,-1,(side==='left'?1:-1)*.3*Math.sin(t*7)]);}
+  }
+  if(/nod|yes|agree/.test(n)){const head=rig.bones.get('head');if(head)head.quaternion.multiply(new THREE.Quaternion().setFromEuler(new THREE.Euler(.1*Math.sin(t*4),0,0)));}
 }
 
 export function createStage(container, options={}) {
@@ -331,8 +355,10 @@ export function createStage(container, options={}) {
   }
   function clearMotion(actor=avatar){actor.motionActive=false;if(actor.rig)for(const [bone,bind] of actor.rig.bind)bone.quaternion.copy(bind);}
   function expression(name='neutral',intensity=.5,actor=avatar){actor.emotion=name;actor.intensity=clamp(intensity);}
-  function gesture(name='idle',actor=avatar){actor.gesture=name;}
+  function gesture(name='idle',actor=avatar,time=null){actor.gesture=name;actor.gestureTime=time;}
+  function pointAt(point,actor=avatar){actor.pointTarget=new THREE.Vector3(...point);actor.gesture='aim_target';}
   function setSpeech(value,actor=avatar){actor.speaking=Boolean(value);}
+  function setSpeechLevel(value,actor=avatar){actor.speechLevel=clamp(value);}
   function setFaceChannels(channels,actor=avatar){actor.face=channels;}
   function moveTo(x,z,duration=1,actor=avatar){actor.move={start:clock.elapsedTime,from:actor.root.position.clone(),to:new THREE.Vector3(x,0,z),duration:Math.max(.01,duration)};}
   function addProp(name,x,z,color=0xe0b572,size=[.55,.65,.55]){if(props.has(name))scene.remove(props.get(name));const o=new THREE.Mesh(new THREE.BoxGeometry(...size),new THREE.MeshStandardMaterial({color}));o.position.set(x,size[1]/2,z);scene.add(o);props.set(name,o);return o;}
@@ -342,13 +368,14 @@ export function createStage(container, options={}) {
     const f=channelsFor(a,t);
     if(a.rig){
       if(!a.motionActive){
-        for(const [bone,bind] of a.rig.bind)bone.quaternion.copy(bind);
-        const rotate=(name,x=0,y=0,z=0)=>{const bone=a.rig.bones.get(name);if(bone)bone.quaternion.multiply(new THREE.Quaternion().setFromEuler(new THREE.Euler(x,y,z)));};
-        if(a.walking){const swing=.25*Math.sin(t*8);rotate('leftupleg',swing);rotate('rightupleg',-swing);rotate('leftarm',-swing*.6);rotate('rightarm',swing*.6);}
-        if(/point|touch|reach/.test(a.gesture))rotate('rightarm',-1.1,0,-.25);
-        else if(/welcome|open|explain/.test(a.gesture)){rotate('leftarm',-.25,0,.55);rotate('rightarm',-.25,0,-.55);}
-        else if(/think/.test(a.gesture))rotate('rightarm',-1.4);
-        else if(/wave|beat/.test(a.gesture))rotate('rightarm',-.5,0,-1+.25*Math.sin(t*5));
+        applyGesturePose(a.rig,a.gesture,a.gestureTime??t);
+        if(a.pointTarget&&/aim_target|point|reach/.test(a.gesture)){
+          const side=a.pointTarget.x>=a.root.getWorldPosition(new THREE.Vector3()).x?'left':'right';
+          for(const [parent,child] of [[side+'arm',side+'forearm'],[side+'forearm',side+'hand']]){
+            const bone=a.rig.bones.get(parent),end=a.rig.bones.get(child);
+            if(bone&&end)aimBoneToward(bone,end,a.pointTarget.clone().sub(bone.getWorldPosition(new THREE.Vector3())));
+          }
+        }
       }
       for(const mesh of a.rig.morphs)for(const [name,index] of Object.entries(mesh.morphTargetDictionary)){
         const target=morphName(name);
@@ -370,6 +397,6 @@ export function createStage(container, options={}) {
     }
   }renderer.render(scene,camera);raf=requestAnimationFrame(animate);}
   animate();
-  return {scene,camera,renderer,avatar,actors,ready,makeAvatar,setCharacter,gesture,expression,setSpeech,setFaceChannels,setSkeleton,setMotionFrame,setPosePositions,clearMotion,moveTo,addProp,showAvatar(){avatar.root.visible=true;skeleton.visible=false;},capture(){renderer.render(scene,camera);return renderer.domElement.toDataURL('image/png');},dispose(){disposed=true;cancelAnimationFrame(raf);resize.disconnect();status.remove();selector.remove();if(!previousPosition)container.style.position='';disposeObject(scene);renderer.dispose();renderer.domElement.remove();}};
+  return {scene,camera,renderer,avatar,actors,ready,makeAvatar,setCharacter,gesture,pointAt,expression,setSpeech,setSpeechLevel,setFaceChannels,setSkeleton,setMotionFrame,setPosePositions,clearMotion,moveTo,addProp,showAvatar(){avatar.root.visible=true;skeleton.visible=false;},capture(){renderer.render(scene,camera);return renderer.domElement.toDataURL('image/png');},dispose(){disposed=true;cancelAnimationFrame(raf);resize.disconnect();status.remove();selector.remove();if(!previousPosition)container.style.position='';disposeObject(scene);renderer.dispose();renderer.domElement.remove();}};
 }
 
