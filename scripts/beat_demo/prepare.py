@@ -112,6 +112,8 @@ def emit_clip(dataset, speaker, take, output, max_frames=150, start_frame=0):
                "takeLocalStartFrame": start,
                "source": {"jointNames": names, "parents": parents, "offsets": offsets.tolist(),
                           "restQuaternions": [[0, 0, 0, 1] for _ in parents],
+                          "axisSigns": [-1, 1, 1],
+                          "basisNote": "OmniMo Unity humanoid left-negative-X to MPFB anatomical left-positive-X; mirror X while preserving Y-up and forward Z.",
                           "rotationConvention": "local 6D Gram-Schmidt columns to xyzw quaternions",
                           "rootUnits": "metres"},
                "annotations": {"emotion": record.get("emotion"),

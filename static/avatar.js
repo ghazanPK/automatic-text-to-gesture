@@ -15,6 +15,8 @@ const ALIASES = {
 };
 export function avatarBoneKey(name) {
   const s=semantic(name);
+  const humanoidFinger=s.match(/^(left|right)(thumb|index|middle|ring|little)(proximal|intermediate|distal)$/);
+  if(humanoidFinger)return `${humanoidFinger[2]==='little'?'pinky':humanoidFinger[2]}0${{proximal:1,intermediate:2,distal:3}[humanoidFinger[3]]}${humanoidFinger[1]==='left'?'l':'r'}`;
   const finger=s.match(/^(left|right)(?:hand)?(thumb|index|middle|ring|pinky|little)([123])$/);
   if(finger)return `${finger[2]==='little'?'pinky':finger[2]}0${finger[3]}${finger[1]==='left'?'l':'r'}`;
   return Object.entries(ALIASES).find(([,names])=>names.includes(s))?.[0] || s;
@@ -32,6 +34,10 @@ function quaternion(value, type='quaternion') {
   return null;
 }
 function morphName(name) {return String(name).toLowerCase().replace(/[^a-z0-9]/g,'');}
+export function reflectQuaternion(q,signs=[1,1,1]){
+  const determinant=signs[0]*signs[1]*signs[2];
+  return new THREE.Quaternion(q.x*determinant*signs[0],q.y*determinant*signs[1],q.z*determinant*signs[2],q.w);
+}
 export function disposeObject(object){
   const geometry=new Set(),materials=new Set(),textures=new Set();
   object.traverse(o=>{
@@ -152,6 +158,7 @@ export function createStage(container, options={}) {
     const names=frame.jointNames||frame.joint_order||source.jointNames||source.joint_order||[];
     const type=frame.rotation6d?'rotation6d':'quaternion';
     const basis=quaternion(source.restBasis)||new THREE.Quaternion();
+    const signs=source.axisSigns||[1,1,1];
     const parents=frame.parents||source.parents||[];
     const local=rotations.map(value=>quaternion(value,type)||new THREE.Quaternion());
     const rest=local.map((_,i)=>quaternion(source.restQuaternions?.[i])||new THREE.Quaternion());
@@ -173,11 +180,15 @@ export function createStage(container, options={}) {
     for(const index of indices){
       const bone=actor.rig.bones.get(key(names[index]));if(!bone)continue;
       const parentWorld=bone.parent.getWorldQuaternion(new THREE.Quaternion());
-      bone.quaternion.copy(bindRelativeWorldRotation(world(local,index,frameWorld),world(rest,index,restWorld),actor.rig.restWorld.get(bone),parentWorld,basis));
+      bone.quaternion.copy(bindRelativeWorldRotation(reflectQuaternion(world(local,index,frameWorld),signs),reflectQuaternion(world(rest,index,restWorld),signs),actor.rig.restWorld.get(bone),parentWorld,basis));
       bone.updateMatrixWorld(true);applied++;
     }
+    // BVH rest axes differ from the GLB's anatomical bind axes. World rotation
+    // deltas alone can fold A-pose arms behind the torso. Source FK landmarks
+    // constrain the actual limb directions while retaining quaternion twist.
+    if(Array.isArray(frame.positions))setPosePositions(frame.positions,names,actor,{basis:source.restBasis,axisSigns:signs,preservePose:true});
     actor.motionActive=applied>0;
-    if(frame.rootTranslation){const p=frame.rootTranslation;actor.root.position.set(Number(p[0])||0,Number(p[1])||0,Number(p[2])||0);}
+    if(frame.rootTranslation){const p=new THREE.Vector3(...frame.rootTranslation.map((v,i)=>(Number(v)||0)*signs[i])).applyQuaternion(basis);actor.root.position.copy(p);}
     return applied>0;
   }
   function setPosePositions(joints,jointNames,actor=avatar,options={}){
@@ -188,9 +199,9 @@ export function createStage(container, options={}) {
     }
     if(positions.size<2)return false;
     const basis=options.basis?.length===4?quaternion(options.basis):null;
-    const transform=p=>basis?p.clone().applyQuaternion(basis):p;
+    const transform=p=>{const v=p.clone();if(options.axisSigns)v.multiply(new THREE.Vector3(...options.axisSigns));return basis?v.applyQuaternion(basis):v;};
     // Restore bind rotations, then solve parent-to-child directions in world space.
-    for(const [bone,bind] of actor.rig.bind)bone.quaternion.copy(bind);
+    if(!options.preservePose)for(const [bone,bind] of actor.rig.bind)bone.quaternion.copy(bind);
     actor.rig.model.updateMatrixWorld(true);
     const entries=[...actor.rig.bones.entries()].sort((a,b)=>{
       const depth=o=>{let n=0;for(let p=o.parent;p&&p!==actor.rig.model;p=p.parent)n++;return n;};
