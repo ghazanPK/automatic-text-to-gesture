@@ -37,6 +37,24 @@ def _legacy_default(settings):
         and settings.get('count', 9) == 9 and settings.get('min_energy', 0.08) == 0.08
 
 
+LEGACY_SCHEMA = 'paperreach.beat-gesture-bank.v1'
+LEGACY_SELECTION = 'reviewed diverse hand windows for named take'
+LEGACY_TAKE = '1_wayne_0_1_1'
+
+
+def _legacy_unsettled(data):
+    """A bank from the 2026-10-05 single-take default builder, written before build settings were recorded:
+    schema v1, seed ``base_ids``, the reviewed-window selection text, and every clip and association window
+    from the named take. Hand-built banks without settings do not match and are kept."""
+    if not isinstance(data, dict) or 'build_settings' in data or data.get('schema') != LEGACY_SCHEMA:
+        return False
+    if not data.get('base_ids') or not str(data.get('selection', '')).startswith(LEGACY_SELECTION):
+        return False
+    windows = list(data.get('clips') or []) + list(data.get('associations') or [])
+    return bool(data.get('clips')) and all(isinstance(c, dict) and (c.get('source') or {}).get('take') == LEGACY_TAKE
+                                           for c in windows)
+
+
 def paths(repo_root, mode):
     root = Path(repo_root)
     bank = root/'outputs/beat-library/bank.json'
@@ -58,10 +76,14 @@ def _build_settings(options):
 
 
 def _read_settings(bank):
+    """(build settings, legacy) for a bank file; legacy marks a settings-less single-take default bank."""
     try:
-        return json.loads(bank.read_text(encoding='utf-8')).get('build_settings')
+        data = json.loads(bank.read_text(encoding='utf-8'))
     except (OSError, ValueError):
-        return None
+        return None, False
+    if not isinstance(data, dict):
+        return None, False
+    return data.get('build_settings'), _legacy_unsettled(data)
 
 
 def setup(repo_root, mode, *, processed=None, raw_root=None, speakers=None, takes=None, max_takes_per_speaker=1,
@@ -72,7 +94,9 @@ def setup(repo_root, mode, *, processed=None, raw_root=None, speakers=None, take
     multi-take public default, or a larger processed selection when
     BEAT_PROCESSED_ROOT is set); a bank built from explicit flags keeps its
     selection (rebuilt by a newer builder), a bank from the former single-take
-    default is upgraded, and a hand-built bank without build settings is kept.
+    default is upgraded (also a 2026-10-05 bank written before build settings
+    were recorded, see ``_legacy_unsettled``), and a hand-built bank without
+    build settings is kept.
     Selection flags that differ from the cached bank rebuild it. The adapter is refit when
     its cache key (bank hash, epochs, seed, strong rules, Sentence-BERT setting,
     adapter and paper-package code) changes.
@@ -82,7 +106,7 @@ def setup(repo_root, mode, *, processed=None, raw_root=None, speakers=None, take
                'max_takes_per_speaker': max_takes_per_speaker, 'count': count, 'min_energy': min_energy}
     flagged = any(options[k] != v for k, v in BUILD_DEFAULTS.items())
     builder = _build_module()
-    current = _read_settings(bank) if bank.exists() else None
+    current, legacy = _read_settings(bank) if bank.exists() else (None, False)
     default = False
     if not flagged:
         if current and not current.get('default') and not _legacy_default(current):
@@ -93,11 +117,12 @@ def setup(repo_root, mode, *, processed=None, raw_root=None, speakers=None, take
             options = {k: (v or None) if k in {'speakers', 'takes', 'processed', 'raw_root'} else v for k, v in options.items()}
         else:
             # Default selection (public multi-take, or processed when BEAT_PROCESSED_ROOT is set); a bank from
-            # the former single-take default is upgraded.
+            # the former single-take default (with or without recorded settings) is upgraded.
             options, default = default_selection(), True
     wanted = dict(_build_settings(options), default=default)
-    # A bank without build settings was assembled by hand or by another tool: an unflagged run keeps it.
-    stale = current != wanted and not (not flagged and bank.exists() and current is None)
+    # A bank without build settings was assembled by hand or by another tool: an unflagged run keeps it,
+    # unless it is a settings-less bank from the former single-take default builder.
+    stale = current != wanted and not (not flagged and bank.exists() and current is None and not legacy)
     if rebuild or not bank.exists() or stale:
         result = builder.build(Path(options['processed']) if options['processed'] else None, bank.parent/'source',
                                options['count'], speakers=options['speakers'], takes=options['takes'],
