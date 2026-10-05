@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Authored NVBG-like rule table for `attg import-manual`; equivalent to manual_map.json. -->
+<rules>
+  <rule keyword="negation" priority="5">
+    <pattern>no</pattern><pattern>not</pattern><pattern>never</pattern><pattern>nothing</pattern><pattern>none</pattern>
+    <animation>negation_sweep</animation>
+  </rule>
+  <rule keyword="inclusive" priority="3">
+    <pattern>together</pattern><pattern>everyone</pattern><pattern>all of us</pattern><pattern>we</pattern>
+    <animation>together_motion</animation><animation name="inclusive_open"/>
+  </rule>
+  <rule keyword="forward" priority="2">
+    <pattern>move forward</pattern><pattern>go ahead</pattern><pattern>next step</pattern>
+    <animation>forward_motion</animation>
+  </rule>
+  <rule keyword="self" priority="1">
+    <pattern>i</pattern><pattern>me</pattern><pattern>my</pattern><pattern>myself</pattern>
+    <animation>self_point</animation>
+  </rule>
+</rules>

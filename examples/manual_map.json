@@ -1,0 +1,10 @@
+{
+  "format": "attg-manual-map/1",
+  "description": "Small authored NVBG-style fixture. Gesture ids refer to the procedural bank written by scripts/verify.py; author your own map against your bank ids or import an XML/CSV table with `attg import-manual`.",
+  "rules": [
+    {"keyword": "negation", "patterns": ["no", "not", "never", "nothing", "none"], "gestures": ["negation_sweep"], "priority": 5},
+    {"keyword": "inclusive", "patterns": ["together", "everyone", "all of us", "we"], "gestures": ["together_motion", "inclusive_open"], "priority": 3},
+    {"keyword": "forward", "patterns": ["move forward", "go ahead", "next step"], "gestures": ["forward_motion"], "priority": 2},
+    {"keyword": "self", "patterns": ["i", "me", "my", "myself"], "gestures": ["self_point"], "priority": 1}
+  ]
+}

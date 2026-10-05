@@ -90,7 +90,7 @@ python scripts/prepare_viewer.py --out static/vendor
 python scripts/demo_server.py --example
 ```
 
-The pipeline centers upper-body 2D poses at the neck, slides projected gesture-bank clips over a timed video pose stream, accepts frame-cosine matches at the paper's `0.92` threshold, and records up-to-five-word phrases. Runtime retrieval sums GloVe word vectors for each five-word chunk and selects the most similar stored phrase. An optional `source: manual` entry receives priority on an exact phrase match. The browser's local BEAT index is a compact simulation of weak association over a fixed bank; [Wild Pose Matching](https://github.com/ghazanPK/wild-pose-matching) later replaces this mean pose match with learned matching.
+The pipeline centers upper-body 2D poses at the neck, slides projected gesture-bank clips over a timed video pose stream, accepts frame-cosine matches at the paper's `0.92` threshold, and records up-to-five-word phrases. The frame-cosine mean covers only the gesture's real frames, so a short gesture centre-padded into a longer window can still match. Mining loops over any number of video clips (Algorithm 1's outer loop) and writes a threshold-calibration report. Runtime retrieval sums GloVe word vectors for each five-word chunk and selects the most similar stored phrase. The paper's three maps are available: Manual (NVBG-style keyword rules), Auto (mined rules) and Hybrid (manual keyword match first, GloVe otherwise). The browser's local BEAT index is a compact simulation of weak association over a fixed bank; [Wild Pose Matching](https://github.com/ghazanPK/wild-pose-matching) later replaces this mean pose match with learned matching.
 
 ### Setup and public data
 
@@ -108,20 +108,33 @@ Run the offline verification workflow before preparing a dataset:
 python scripts/verify.py
 ```
 
-It procedurally creates `outputs/verification/video.npz`, `bank.npz`, and a 300-D GloVe-format fixture, then invokes the installed `mine` and `retrieve` CLI paths. Inspect `rules.jsonl` and `sequence.json` in that directory. Replace those generated files with real arrays using the contracts below; no code path changes are required.
+It procedurally creates two clips (`clip_a.npz`, `clip_b.npz`), a variable-length `bank.npz` and a 300-D GloVe-format fixture. It then runs the installed CLI: `mine` over both clips at `0.92`, `import-manual` on the authored `examples/manual_map_nvbg.xml`, and `retrieve` with each of `--map auto|manual|hybrid`. Inspect `rules.jsonl`, `rules.jsonl.calibration.json` and `sequence-*.json` in that directory. Replace those generated files with real arrays using the contracts below; no code path changes are required.
 
 Prepare downloads yourself. Suitable public replacements are the [TED Gesture Dataset](https://github.com/youngwoo-yoon/Co-Speech_Gesture_Generation) for aligned talk pose/text and a redistributable animation library you have rights to use. Download `glove.6B.300d.txt` from the [GloVe project](https://nlp.stanford.edu/projects/glove/). ICT Virtual Human Toolkit animations referenced by the paper are not bundled; check their own access and license terms.
 
-`video.npz` contains `pose: float32[F,J,2]` and scalar `words_json`, a JSON list of `{word,start_frame,end_frame}`. `bank.npz` contains one `[F,J,2]` array per gesture ID. Both must use the same joint order, coordinates, FPS, and neck index 1. Project 3D bank motion into the same camera convention before use.
+Each video NPZ contains `pose: float32[F,J,2]`, a scalar `words_json` (a JSON list of `{word,start_frame,end_frame}`) and an optional scalar `clip_id`. `bank.npz` contains one `[F,J,2]` array per gesture ID; gestures may differ in length. All files must use the same joint order, coordinates, FPS, and neck index (default 1). Project 3D bank motion into the same camera convention before use.
 
 ```bash
-attg mine --video data/video.npz --bank data/bank.npz --output outputs/rules.jsonl
+attg mine --video data/clip_001.npz data/clip_002.npz --bank data/bank.npz --output outputs/rules.jsonl
+attg mine --manifest data/clips.txt --bank data/bank.npz --threshold-percentile 95 --output outputs/rules.jsonl
+attg calibrate --manifest data/clips.txt --bank data/bank.npz --output outputs/calibration.json
 attg retrieve --rules outputs/rules.jsonl --glove data/glove.6B.300d.txt \
   --text "we can move forward together today" --audio-seconds 2.8 --output outputs/sequence.json
+attg import-manual --input my_nvbg_rules.xml --output data/manual_map.json
+attg retrieve --map hybrid --manual data/manual_map.json --rules outputs/rules.jsonl --glove data/glove.6B.300d.txt \
+  --text "we will never give up on this" --output outputs/sequence.json
+attg config
 python -m pytest
 ```
 
-The rule file records phrase, gesture ID, similarity, frame interval, and source. Retrieval produces ordered gesture slots with semantic score and optional speech timing.
+- **Mining.** `--video` accepts several files and repeats. `--manifest` lists one NPZ per line, or a JSON list. Rule `source` is the clip ID (made unique), plus the frame interval. The stride is the longest bank gesture.
+- **Calibration report.** `mine` saves it to `<output>.calibration.json` and prints a summary. It covers score percentiles, and per-threshold window pass rate and bank pass fraction. It warns when most of the bank passes most windows, which makes the random pick arbitrary. `--threshold-percentile P` sets the threshold to the P-th percentile of all window-by-gesture scores instead of `0.92`.
+- **Manual map.** The format is JSON `{"format":"attg-manual-map/1","rules":[{"keyword","patterns":[...],"gestures":[...],"priority"}]}`; see [examples/manual_map.json](examples/manual_map.json). `import-manual` converts an NVBG-like XML table (`<rule keyword priority><pattern/>…<animation/></rule>`) or a CSV table (`keyword,patterns,gestures,priority`, with `|` between items). Gesture IDs must exist in your bank; the fixture's IDs match the `verify.py` bank.
+- **Map modes.** A manual rule matches when one of its patterns appears as contiguous words in the chunk. Higher priority wins, then the longer pattern; one of the rule's gestures is picked at random. `--map manual` sends unmatched chunks to idle. `--map hybrid` tries the manual map first, then GloVe. `--map auto` uses GloVe only.
+- **Idle slots.** A chunk with no GloVe vocabulary, or below the optional `--min-similarity`, becomes an idle slot (`--idle-id`, default `idle`). `--oov skip` drops it instead, and `--oov error` restores the old exception.
+- **Defaults.** `attg config` prints them: threshold, phrase length, chunk size, neck joint, seed and OOV policy. A JSON file passed with `--config` overrides them.
+
+The rule file records phrase, gesture ID, similarity, frame interval, and source. Retrieval produces ordered gesture slots with route (`manual`, `auto` or `idle`), semantic score and optional speech timing.
 
 ### Prepare and view a motion result
 
@@ -134,7 +147,7 @@ attg retrieve --rules outputs/rules.jsonl --glove data/glove.6B.300d.txt --text 
 python scripts/export_playback.py --sequence outputs/sequence.json --motion data/prepared/bank.npz --output outputs/playback.json
 ```
 
-`playback.json` contains selected joint frames, timing and semantic scores. The included `scripts/verify.py` writes a separately labeled procedural verification fixture with illustrative motion and tiny word vectors. It is not a research result.
+`playback.json` contains selected joint frames, timing and semantic scores. Idle slots are left out, so the renderer holds its rest pose for them. The included `scripts/verify.py` writes a separately labeled procedural verification fixture with illustrative motion and tiny word vectors. It is not a research result.
 
 Install the local 3D viewer dependency and run the live query demo:
 

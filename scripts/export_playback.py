@@ -12,6 +12,8 @@ def make_playback(sequence: list[dict] | dict, library: dict[str, np.ndarray], f
         raise ValueError("playback requires a positive FPS and non-empty retrieval sequence")
     output = []
     for slot in slots:
+        if slot.get("map") == "idle" or slot.get("gesture_id") is None:
+            continue  # idle slot: the renderer keeps its rest pose
         gid = str(slot["gesture_id"])
         if gid not in library:
             raise KeyError(f"retrieved gesture {gid!r} is absent from the motion library")
@@ -30,6 +32,8 @@ def make_playback(sequence: list[dict] | dict, library: dict[str, np.ndarray], f
                        "source": slot.get("source"),
                        "cluster_id": slot.get("cluster_id"),
                        "duration_seconds": slot.get("duration_seconds", len(clip) / fps)})
+    if not output:
+        raise ValueError("every retrieved slot is idle; nothing to play")
     canonical = ["Hips", "Neck", "Head", "LeftShoulder", "LeftArm",
                  "LeftForeArm", "LeftHand", "RightShoulder", "RightArm", "RightForeArm", "RightHand"]
     count = len(output[0]["frames"][0])
@@ -46,7 +50,8 @@ def main() -> None:
     a = p.parse_args()
     data = np.load(a.motion, allow_pickle=False)
     if "motion3d" in data:
-        library = {str(gid): clip for gid, clip in zip(data["ids"], data["motion3d"])}
+        lengths = data["lengths"] if "lengths" in data else [len(clip) for clip in data["motion3d"]]
+        library = {str(gid): clip[: int(n)] for gid, clip, n in zip(data["ids"], data["motion3d"], lengths)}
     elif "motion" in data:
         library = {str(gid): clip for gid, clip in zip(data["ids"], data["motion"])}
     else:

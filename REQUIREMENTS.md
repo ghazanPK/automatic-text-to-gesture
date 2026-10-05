@@ -12,13 +12,21 @@
 ## Reimplementation decisions
 
 - Data uses explicit `.npz` and JSONL contracts rather than the institute pipeline. Pose arrays are `[frames, joints, 2]`; words carry `start_frame` and `end_frame`.
-- Deterministic random selection is exposed through `--seed`. Zero-norm frames contribute similarity zero.
-- Manual rules, when supplied, win on exact normalized phrase matches; otherwise all entries compete semantically.
+- Deterministic random selection is exposed through `--seed`. Zero-norm window frames contribute similarity zero.
+- The frame-cosine mean is taken over the gesture's real frames only. Centre-padding frames, and all-zero frames of a pre-padded bank, are excluded, so padding does not cap the score of short gestures.
+- `mine` runs Algorithm 1's outer loop over many clips (`--video` files or `--manifest`). It writes a calibration report: score percentiles, per-threshold window pass rates and bank pass fractions, and a degeneracy warning. `--threshold-percentile` derives the threshold from the score distribution.
+- The Manual map uses an NVBG-like format: a keyword holds several patterns and several gestures, with a priority. It can be imported from XML or CSV. `--map manual|auto|hybrid` selects the map. Hybrid applies manual keyword containment first and falls back to GloVe. Chunks with no vocabulary or no match go idle (or are skipped) instead of raising.
+- Threshold, phrase length, chunk size, neck joint, seed and OOV policy are exposed as CLI flags and a JSON config.
 - No pose extraction, TTS, renderer, datasets, gesture assets, or pretrained vectors are distributed.
 
 ## Acceptance criteria
 
-`mine` writes a JSONL rule map with provenance and score; `retrieve` writes ordered gesture slots and timing; malformed shapes and timestamps fail clearly; the included verification test covers normalization, threshold mining, and semantic retrieval.
+`mine` writes a JSONL rule map with provenance and score, plus a calibration report. `retrieve` writes ordered gesture slots with route and timing. Malformed shapes and timestamps fail clearly. Tests cover:
+- normalization;
+- padding-aware scoring, including a 30-frame gesture inside a 45-frame window scoring about 1.0;
+- multi-clip mining and calibration;
+- Manual, Auto and Hybrid retrieval, and the XML/CSV importers;
+- out-of-vocabulary idle and skip handling.
 
 
 ## Interactive data handoff
