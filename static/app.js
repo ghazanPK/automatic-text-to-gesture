@@ -8,7 +8,7 @@ if(mode==='wild'||mode==='multilingual'){$('#threshold-wrap').hidden=true;$('#se
 if(mode==='multilingual'){$('#language-wrap').hidden=false;$('#query').value='결과를 보여 주세요';}
 if(mode==='ridge'){$('#threshold').value='0.72';$('#threshold-value').textContent='0.72';$('#query').value='open both hands now';}
 $('#threshold').addEventListener('input',()=>$('#threshold-value').textContent=$('#threshold').value);
-let data=null,frames=[],playing=true,frame=0,last=performance.now();
+let data=null,frames=[],playing=false,frame=0,last=performance.now();
 const edgeNames=[['Hips','Neck'],['Neck','Head'],['Neck','LeftShoulder'],['LeftShoulder','LeftArm'],['LeftArm','LeftForeArm'],['LeftForeArm','LeftHand'],['Neck','RightShoulder'],['RightShoulder','RightArm'],['RightArm','RightForeArm'],['RightForeArm','RightHand']];
 function allFrames(){return frames;}
 function draw(){
@@ -52,3 +52,8 @@ $('#form').onsubmit=async e=>{
     $('#trace').replaceChildren(table);$('#status').textContent='Motion loaded.';
   }catch(error){$('#status').textContent=error.message;}
 };
+
+// Bundled starter query: load a clip without requiring an upload.
+$('#play').textContent='Play';
+if(mode==='multilingual')$('#language').value='ko';
+stage.ready.then(()=>$('#form').requestSubmit());

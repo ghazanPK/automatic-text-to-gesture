@@ -27,6 +27,9 @@ const POSE_CHILD={hips:'spine',spine:'chest',chest:'upperchest',upperchest:'neck
   leftforearm:'lefthand',rightforearm:'righthand',lefthand:'middle01l',righthand:'middle01r',
   leftupleg:'leftleg',rightupleg:'rightleg',leftleg:'leftfoot',rightleg:'rightfoot'};
 export function poseDirectionChild(bone,positions){
+  // Sparse arm-only libraries do not calibrate the chest/clavicle frame.
+  // Keep the authored shoulder attachment rather than folding collar skin.
+  if(['leftshoulder','rightshoulder'].includes(key(bone.name))&&!positions.has('chest')&&!positions.has('upperchest'))return null;
   const children=bone.children.filter(o=>o.isBone&&positions.has(key(o.name)));
   const preferred=POSE_CHILD[key(bone.name)];
   // A torso branch must follow the spine, never the first shoulder or thigh.
@@ -171,7 +174,10 @@ function channelsFor(actor,t) {
 export function createStage(container, options={}) {
   const scene=new THREE.Scene();scene.background=new THREE.Color(options.background||'#101827');
   const camera=new THREE.PerspectiveCamera(42,1,.01,100);camera.position.set(0,1.6,5.8);camera.lookAt(0,1.15,0);
-  const renderer=new THREE.WebGLRenderer({antialias:true,preserveDrawingBuffer:true});renderer.setPixelRatio(Math.min(devicePixelRatio,2));container.append(renderer.domElement);
+  const renderer=new THREE.WebGLRenderer({antialias:true,preserveDrawingBuffer:true});renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+  // CSS size follows the container; drawing-buffer size includes pixel ratio.
+  // Intrinsic canvas sizing otherwise feeds back into grid layout on HiDPI.
+  Object.assign(renderer.domElement.style,{display:'block',width:'100%',height:'100%'});container.append(renderer.domElement);
   scene.add(new THREE.HemisphereLight(0xe6f4ff,0x344055,2.4));const light=new THREE.DirectionalLight(0xffffff,2);light.position.set(3,5,4);scene.add(light);
   const floor=new THREE.Mesh(new THREE.PlaneGeometry(20,20),new THREE.MeshStandardMaterial({color:0x182438,roughness:.9}));floor.rotation.x=-Math.PI/2;scene.add(floor);
   const grid=new THREE.GridHelper(12,24,0x405575,0x24344b);grid.position.y=.002;scene.add(grid);
@@ -273,7 +279,7 @@ export function createStage(container, options={}) {
     // Applying their twist before fitting landmarks collapses the arm meshes.
     // Fit FK landmarks from the target bind pose; never retain uncalibrated
     // source twist. Quaternion-only inputs keep the explicit delta path above.
-    if(Array.isArray(frame.positions))setPosePositions(frame.positions,names,actor,{basis:source.restBasis,axisSigns:signs});
+    if(Array.isArray(frame.positions)&&setPosePositions(frame.positions,names,actor,{basis:source.restBasis,axisSigns:signs}))applied=Math.max(1,applied);
     actor.motionActive=applied>0;
     if(frame.rootTranslation){const p=new THREE.Vector3(...frame.rootTranslation.map((v,i)=>(Number(v)||0)*signs[i])).applyQuaternion(basis);actor.root.position.copy(p);}
     return applied>0;

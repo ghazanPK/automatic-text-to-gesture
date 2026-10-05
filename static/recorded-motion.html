@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Recorded BEAT motion viewer</title>
+  <title>Avatar motion viewer</title>
   <style>
     :root{color-scheme:dark;font-family:Inter,Segoe UI,Arial,sans-serif;background:#0b1020;color:#e9f1fb}
     *{box-sizing:border-box}body{margin:0}header{padding:24px clamp(16px,4vw,54px);border-bottom:1px solid #294056;background:#101c2d}
@@ -24,14 +24,14 @@
   </style>
 </head>
 <body>
-<header><div class="eyebrow">Recorded public dataset playback</div><h1>BEAT motion viewer</h1><p>Inspect synchronized body motion, facial blendshapes, and speech from a locally prepared BEAT clip. This is recorded dataset playback for visualization; it does not run a paper's gesture generation algorithm.</p></header>
+<header><div class="eyebrow">Authored sample and public motion playback</div><h1>Avatar motion viewer</h1><p>Click Play to animate the bundled authored sample. Replace it with locally prepared BEAT motion, facial blendshapes, and speech to inspect recorded performances.</p></header>
 <main>
   <section class="panel" aria-label="Local clip files">
     <h2>Load local clip files</h2>
-    <div class="field"><label for="motion-file">Motion JSON · required</label><input id="motion-file" type="file" accept=".json,application/json"><p class="help">Open a prepared <code>*-motion.json</code> or <code>*-raw-motion.json</code> file.</p></div>
+    <div class="field"><label for="motion-file">Motion JSON · replace sample</label><input id="motion-file" type="file" accept=".json,application/json"><p class="help">Open a prepared <code>*-motion.json</code> or <code>*-raw-motion.json</code> file.</p></div>
     <div class="field"><label for="face-file">Face JSON · optional</label><input id="face-file" type="file" accept=".json,application/json"><p class="help">Adds 51 recorded ARKit channels, including the nine LUFA brow and eye channels.</p></div>
     <div class="field"><label for="audio-file">Audio WAV · optional</label><input id="audio-file" type="file" accept=".wav,audio/wav,audio/x-wav"><p class="help">A matching cropped 16 kHz WAV keeps speech synchronized with the motion.</p></div>
-    <div id="status" class="status" role="status" aria-live="polite">Choose a motion file to begin. The character selector is in the upper right of the stage.</div>
+    <div id="status" class="status" role="status" aria-live="polite">Loading the bundled authored sample. The character selector is in the upper right of the stage.</div>
     <div class="facts"><div class="fact"><strong id="clip-name">—</strong><span>Sequence</span></div><div class="fact"><strong id="frame-count">—</strong><span>Frames</span></div><div class="fact"><strong id="fps">—</strong><span>Motion rate</span></div><div class="fact"><strong id="channels">—</strong><span>Face channels</span></div></div>
     <p class="note">Files stay in this browser tab. Follow this repository's README for public BEAT preparation steps. No dataset clip or trained model is bundled with this viewer.</p>
   </section>
@@ -113,19 +113,31 @@
   $('play').onclick=()=>playing?pause():play();
   $('restart').onclick=()=>{pause();showFrame(0);if(audio.src)audio.currentTime=0;};
   $('scrub').oninput=()=>{const resume=playing;if(resume)pause();showFrame(Number($('scrub').value));if(audio.src)audio.currentTime=frameIndex/motion.fps;if(resume)play();};
-  $('motion-file').onchange=async event=>{
-    pause();try{
-      const file=event.target.files?.[0];if(!file)return;
-      const data=JSON.parse(await file.text());
+  async function loadMotion(data,name){
       if(!Array.isArray(data.frames)||!data.frames.length||!(Number(data.fps)>0)||!Array.isArray(data.source?.jointNames))throw new Error('Expected prepared motion JSON with frames, fps, and source.jointNames.');
       if(!Array.isArray(data.frames[0].quaternions)&&!Array.isArray(data.frames[0].positions))throw new Error('Motion frames need quaternions or positions.');
       motion=data;frameIndex=0;$('scrub').max=String(data.frames.length-1);$('scrub').disabled=false;$('play').disabled=false;$('restart').disabled=false;
-      $('clip-name').textContent=data.sequenceId||file.name;$('frame-count').textContent=String(data.frames.length);$('fps').textContent=`${data.fps} Hz`;
+      $('clip-name').textContent=data.sequenceId||name;$('frame-count').textContent=String(data.frames.length);$('fps').textContent=`${data.fps} Hz`;
       const avatarResult=await stage.ready;showFrame(0);
-      status(avatarResult.loaded?`Ready: ${data.sequenceId||file.name}. Select a character in the stage, then play or scrub.`:
-        `Ready: ${data.sequenceId||file.name}. Showing the recorded skeleton while character assets are unavailable.`);
+      status(avatarResult.loaded?`Ready: ${data.sequenceId||name}. Select a character in the stage, then play or scrub.`:
+        `Ready: ${data.sequenceId||name}. Showing the skeleton while character assets are unavailable.`);
+  }
+  $('motion-file').onchange=async event=>{
+    pause();try{
+      const file=event.target.files?.[0];if(!file)return;
+      await loadMotion(JSON.parse(await file.text()),file.name);
     }catch(error){motion=null;$('play').disabled=true;$('restart').disabled=true;$('scrub').disabled=true;status(`Could not load motion: ${error.message}`);}
   };
+  Promise.all(['avatar-motion.json','avatar-face.json'].map(async name=>{
+    const response=await fetch('./examples/'+name);
+    if(!response.ok)throw new Error(`Bundled sample unavailable: ${name}`);
+    return response.json();
+  })).then(async ([sample,faceSample])=>{
+    if(motion)return;
+    if(!face){face=faceSample;$('channels').textContent=String(face.names.length);}
+    await loadMotion(sample,'authored example');
+    status('Authored avatar sample loaded. Click Play; replace it with your prepared BEAT files when ready.');
+  }).catch(error=>status(error.message));
   $('face-file').onchange=async event=>{
     try{const file=event.target.files?.[0];if(!file){face=null;$('channels').textContent='—';return;}
       const data=JSON.parse(await file.text()),names=data.names||data.lufaNames,rows=data.weights||data.lufaWeights;
