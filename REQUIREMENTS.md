@@ -23,7 +23,7 @@
 
 ## Interactive data handoff
 
-The browser queries the existing retrieval implementation and renders the selected motion frames with a pinned local Three.js module. Its immediate example mode is author-created motion plus explicitly illustrative, untrained vectors. Production mode accepts the documented public BVH/timed-transcript preparation outputs, real local encoder assets and trained checkpoints as appropriate. The preparation adapter preserves motion/transcript alignment and declares skeleton/FPS assumptions; it does not fabricate annotations or evaluation results. Speech is optional and replaceable (Kokoro-82M English/faster-whisper small CPU INT8, with browser voice/typed-input alternatives). Verification must cover clip serialization and algorithm routing, with model quality evaluation deferred to user-prepared public data.
+`scripts/start_demo.py` prepares one official BEAT BVH/TextGrid take into an ignored, locally generated bank and runs the browser. Three seed gestures remain the entire playback bank; disjoint paired windows produce weak associations, yielding 21 local text rules in the current small sample. The trace exposes seed or association routes and selected IDs. This small simulation is distinct from the original GloVe and video-pose CLI contracts above; it does not establish paper-scale rule coverage or matching quality. The older `--example` server path remains an explicitly authored offline fixture. Speech is optional, and motion playback follows speech progress with short clip blends. No public recording or fitted artifact is bundled.
 
 ## Bundled fictional avatar substitution
 

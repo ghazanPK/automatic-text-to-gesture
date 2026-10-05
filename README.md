@@ -57,18 +57,22 @@ Please cite the research paper when using its ideas; [download the BibTeX citati
 
 ![Automatic Text To Gesture runnable demo](demo-assets/preview.png)
 
-*Local demo with small starter examples; the capture illustrates the interface, not a reproduced paper benchmark.*
+*The prepared BEAT sequence shows local weak rule association over a fixed three-clip bank. This preview is not a paper benchmark.*
 
 From the repository root, using the Python environment described below:
 
 ```sh
 python -m pip install -e .
+python -m pip install -r scripts/requirements-demo.txt
 python scripts/start_demo.py
 ```
 
-Open **http://127.0.0.1:8080/**. A starter query and motion clip load automatically. Click **Play speech + gesture** to start both together, or change the text and click **Retrieve motion**. Stop cancels speech; scrubbing previews a pose without speaking. The launcher selects the bundled inputs automatically; it also builds the small authored index for RAG demos. Avatar demos prepare their pinned Three.js modules on first launch, so that step needs internet access. Model weights and public datasets are optional for the starter workflow and are prepared separately for real-data use.
+Open **http://127.0.0.1:8080/**. On first launch, the script downloads one official BEAT BVH and matching TextGrid, builds a local nine-clip source bank, then makes this method's three-clip playback bank and weak association index in ignored `outputs/`. The three seed pairs expand to 21 text rules while the motion bank stays at three gestures. Choose a suggested utterance to inspect its clip IDs and rule route, then click **Play speech + gesture**. The aligned text places clips during speech; Stop cancels speech, and scrubbing previews a pose. The first launch also downloads pinned Three.js modules. Public recordings and fitted artifacts stay local and are not bundled.
 
 The 3D presentation uses shared Three.js avatar components and bundled fictional CC0 characters. The paper-specific algorithms and data adapters live in this repository.
+
+
+To replace the demo motion with an existing processed BEAT take, run `python scripts/prepare_beat_demo.py --processed /path/to/processed/beat`, then restart the server. Use `--rebuild --epochs 80` to regenerate the public sample and refit the small adapter. For a larger bank, the documented full-data CLI below retains the paper-specific input contracts.
 
 <!-- demo-preview:end -->
 
@@ -78,7 +82,7 @@ The 3D presentation uses shared Three.js avatar components and bundled fictional
 
 Independent, clean educational implementation of the method in *Automatic text-to-gesture rule generation for embodied conversational agents* (Ali, Lee, and Hwang, 2020, CAVW, DOI: [10.1002/cav.1944](https://doi.org/10.1002/cav.1944)). This is not the institute source code and does not reproduce reported results by itself.
 
-Try the local browser demo after installation: `python scripts/prepare_viewer.py --out static/vendor`, then `python scripts/demo_server.py --example`. Open the printed URL. This mode uses author-created arm motion and transparent illustrative word vectors, labeled in the UI; it exercises the real mining and retrieval functions without claiming a trained model. The prepared-data commands below switch to actual GloVe and motion files.
+The default browser path is the prepared BEAT demo above. For an offline algorithm fixture, `python scripts/demo_server.py --example` still serves author-created arm motion and illustrative word vectors after viewer preparation. It exercises mining and retrieval functions without fitting a model; use the prepared-data commands below for the original CLI contracts.
 
 ```bash
 python -m pip install -e .
@@ -86,7 +90,7 @@ python scripts/prepare_viewer.py --out static/vendor
 python scripts/demo_server.py --example
 ```
 
-The pipeline centers upper-body 2D poses at the neck, slides projected gesture-bank clips over a timed video pose stream, accepts frame-cosine matches at the paper's `0.92` threshold, and records up-to-five-word phrases. Runtime retrieval sums GloVe word vectors for each five-word chunk and selects the most similar stored phrase. An optional `source: manual` entry receives priority on an exact phrase match.
+The pipeline centers upper-body 2D poses at the neck, slides projected gesture-bank clips over a timed video pose stream, accepts frame-cosine matches at the paper's `0.92` threshold, and records up-to-five-word phrases. Runtime retrieval sums GloVe word vectors for each five-word chunk and selects the most similar stored phrase. An optional `source: manual` entry receives priority on an exact phrase match. The browser's local BEAT index is a compact simulation of weak association over a fixed bank; [Wild Pose Matching](https://github.com/ghazanPK/wild-pose-matching) later replaces this mean pose match with learned matching.
 
 ### Setup and public data
 

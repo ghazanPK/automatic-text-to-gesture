@@ -7,6 +7,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 import numpy as np
 from export_playback import make_playback
+from beat_runtime import serve_beat, library as beat_library, query_application
 from speech_backend import SpeechBackend, speech_route
 
 MODE = "automatic"
@@ -18,6 +19,8 @@ def serve(a):
     if a.example:
         from example_demo import query as example_query
         def query(text, params):
+            if beat_library(root.parent, MODE)['ready']:
+                return query_application(root.parent, MODE, text, params)
             return example_query(MODE, text, params)
     elif MODE == "automatic":
         from automatic_text_to_gesture.core import TOKEN, load_glove, mine_rules, retrieve
@@ -114,6 +117,7 @@ def serve(a):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, directory=str(root), **kwargs)
         def do_GET(self):
+            if serve_beat(self, root.parent, MODE): return
             parsed = urlparse(self.path)
             if parsed.path == "/api/query":
                 params = parse_qs(parsed.query)
@@ -132,6 +136,7 @@ def serve(a):
                 return
             return super().do_GET()
         def do_POST(self):
+            if serve_beat(self, root.parent, MODE): return
             if speech_route(self, speech):
                 return
             self.send_error(404)

@@ -1,0 +1,13 @@
+{
+  "provenance": {
+    "kind": "llm_json",
+    "producer": "Codex assistant semantic annotation",
+    "date": "2026-10-05",
+    "scope": "Salient contiguous phrases selected from the named public BEAT transcript. Observed text-motion associations; no semantic gesture ground truth or benchmark claim. This cache avoids a hosted call during demo startup."
+  },
+  "phrases": [
+    "walk around enjoying the sunshine",
+    "friends volunteer at the buddhist temple",
+    "watching anime is helpful"
+  ]
+}
