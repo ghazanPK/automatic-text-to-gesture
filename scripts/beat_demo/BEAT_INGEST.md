@@ -168,14 +168,22 @@ python scripts/prepare_beat_demo.py --raw-root D:/beat_english_v0.2.1 --speakers
 python scripts/prepare_beat_demo.py --takes 1_wayne_0_1_1,2_scott_0_1_1   # public download, <=25 MB per file
 ```
 
-Changing these flags rebuilds the bank. The adapter is refitted when its cache key
-changes. The cache key covers:
+**Scaling up.** One take per role gives small pools (about 9 bank clips and 50
+association windows for speakers 1–3). Add `--speakers` or raise
+`--max-takes-per-speaker` for more units, training pairs and rules.
 
-- the bank hash;
+**Rebuilds.** Changing these flags rebuilds the bank. A bank written by an older
+builder is also rebuilt, from its stored selection, on the next unflagged run.
+The current builder is `v3`.
+
+**Cache key.** The adapter is refitted when its cache key changes. The key covers:
+
+- the bank hash (which includes the streams' content hash);
 - epochs and seed;
 - the strong rules;
+- the Sentence-BERT setting;
 - `beat_methods.py`;
-- the paper-package sources.
+- the vendored paper-package sources.
 
 The bank has the following properties:
 
@@ -192,51 +200,158 @@ The bank has the following properties:
 - **Provenance.** Each clip records speaker, take, window id, route, motion
   energy and source URLs. The bank records the takes, roles and rejected static
   windows.
+- **Streams (builder v3).**
+  - When roles come from separate takes, the continuous `library` and `train`
+    takes are saved next to the bank in `bank-streams.npz`.
+  - The positions use the same transform as the clips.
+  - `bank.json` holds `streams` metadata: the takes, their words and a content
+    hash.
+  - A single shared take stores no streams.
 
 ## Retrieval adapters (`beat_methods.py`)
 
-All four modes share these rules:
+Each mode is a thin adapter over its vendored paper package (`scripts/beat_deps/`).
+The adapters reuse the package's own functions. They add only data
+preparation, response formatting and the idle floor.
 
-- **Similarity floor and idle.** A chunk that shares no content word with any
-  rule, or scores below `min_similarity` (default 0.2), plays an explicit
-  `idle` slot (route `idle_no_match`, confidence 0, a still neutral pose).
-  `no_match` is true when every slot idles. RIDGE idles when the chunk has no
-  in-vocabulary content word.
-- **Route counts.** `metrics.route_counts` is reported with every query.
+All four modes share these rules.
 
-### Automatic
+- **Text encoders.**
+  - **Sentence-BERT.** Used only from a local model folder, given by
+    `BEAT_SBERT_MODEL` or `prepare_beat_demo.py --sbert`. Nothing is downloaded.
+  - **TF-IDF fallback.** Used otherwise. The response says so in
+    `text_encoder` (`tfidf-fallback (...)`).
+  - **Automatic mode** uses GloVe when `BEAT_GLOVE_PATH` names a local file,
+    and labelled bag-of-words vectors otherwise.
+- **Idle floor.**
+  - A chunk with no in-vocabulary content word plays an explicit `idle` slot.
+    So does a chunk scoring below `min_similarity`: 0.2 with TF-IDF or
+    bag-of-words, 0.35 with Sentence-BERT.
+  - An idle slot has route `idle_no_match`, confidence 0 and a still neutral
+    pose.
+  - `no_match` is true when every slot idles.
+- **Reporting.** `metrics.route_counts` and `text_encoder` come with every
+  query.
+- **Suggested queries.** These are chosen at prepare time and checked by
+  running them through `query`.
+- **Gesture ids.**
+  - Automatic plays the three bank seed clips: `beat_01`–`beat_03`.
+  - Wild and Multilingual play extracted units, with window ids
+    `<take>:<start>-<end>` in 30 fps take frames.
+  - RIDGE plays bank clips, plus phrase spans with ids
+    `<clip>:<start>-<end>` in clip frames.
+  - The playback bank is written as `outputs/beat-library/<mode>/<mode>-bank.json`.
+    `/api/beat-library` lists it.
 
-- **Mining.** Each association window is split into phrases of at most 5
-  words, using word timing. Each phrase's pose span is compared with the three
-  bank gestures by padding-aware mean frame cosine on neck-relative arm and hand
-  XY, after removing the mean pose.
-- **Rules.** Every gesture at or above the threshold is a candidate, and one is
-  picked at random with the seed.
-- **Threshold.** The default is the 80% quantile of phrase–gesture cosines
-  (`default_threshold`). A UI threshold or seed re-mines at query time.
-- **Chunks.** Queries use 5-word chunks.
-- **Metrics.** Reported metrics are `rule_usage`, `max_clip_share` and
-  `pair_pass_rate`.
+### Automatic (`automatic_text_to_gesture.core`)
 
-### Wild and Multilingual
+- **Mining.** `mine_clips` (Algorithm 1) mines every association window with a
+  padding-aware `GestureBank`.
+  - The window stride equals the gesture length.
+  - Phrases come from `aligned_phrase` and have at most 5 words.
+  - Among the passing gestures, one is picked at random with the seed.
+- **Threshold.** The default is the 80th percentile from
+  `threshold_from_percentile`, rounded down to the UI's 0.01 step.
+  `calibration_report` is stored. A different UI threshold or seed re-mines at
+  query time.
+- **Retrieval.** Retrieval uses `retrieve` (Algorithm 2) with the hybrid map:
+  - **Manual map.** The seed clips' own phrases, as `ManualRule` entries
+    (route `seed_rule`).
+  - **Auto map.** The mined rules (route `mined_pose_rule`).
+  - **Chunking.** Paper chunks of 5 words. A trailing piece under 5 words is
+    dropped.
+  - Out-of-vocabulary chunks play idle.
+  - `map=manual|auto` selects one map only.
+- **Deviation from the paper.**
+  - **Change.** Poses are frontal arm and hand XY with the dataset mean pose
+    removed before the cosine.
+  - **Why.** On raw neck-relative poses, every bank gesture scored about 0.96
+    against every window, so all rules collapsed onto one gesture.
+  - **Index note.** The index records this in `threshold_rule`.
+- **Metrics.** Reported metrics are `rule_usage`, `max_clip_share`,
+  `pair_pass_rate` and `mean_passing_gestures`.
 
-- **Training.** The encoders train on `train` associations, with a random
-  camera yaw of ±30° per pair. Multilingual also uses the paper's `augment_2d`.
-- **Mining.** Rules are mined from `wild` associations, projected at yaw 20°
-  and pitch 5° with noise, jitter and dropout.
-- **Suggested queries.** Suggestions are learned-rule phrases whose first
-  route is `learned_pose_rule`, plus one bank transcript.
-- **Metrics.** Reported metrics are `rule_routes`, `learned_rule_usage`,
-  `cluster_sizes`, and `heldout_cross_view_top1` with `heldout_chance`.
+### Wild (`wild_pose_matching`)
 
-### RIDGE
+- **Units.** `units.extract_units` (Algorithm 3) extracts units from the library
+  stream at 15 fps.
+  - The variance threshold is the 25th percentile of window variances.
+  - Poses are scaled with `Normalization`.
+  - Without streams, each bank window yields one unit.
+- **Training.**
+  - **Data.** `dense_windows` over the train stream, or train associations
+    without streams. Each pair gets a random camera yaw of ±30°.
+  - **Trainer.** `training.train_gestureclr`, with the demo preset, the paper's
+    augmentation and a validation split.
+  - **Budget.** Capped at 100 steps of batch 64, about 30–50 s on a CPU.
+  - The checkpoint is written with `save_checkpoint`.
+- **Rules.** `wild` associations are projected at yaw 20° and pitch 5°, then
+  corrupted with noise, jitter and dropout. `build_rules` maps them to their
+  nearest unit, and units are grouped with `cluster_latents`.
+- **Retrieval.** `pipeline.retrieve` matches 6-word chunks. It samples a unit at
+  random inside the matched cluster, with a numpy generator seeded once per
+  query.
 
-- **Training.** The fallback trains on association windows only. The bank
-  clips it retrieves are held out.
+### Multilingual (`multilingual_gesture`)
+
+- **Units.** `extract_unit_spans` (Algorithm 1) extracts units with the
+  automatic elbow threshold. Units keep their natural 2–3 s length.
+- **Training.** The package's own `cli train` command trains GestureCLR. Each
+  sample draws one augmentation condition. Models are loaded with
+  `load_gestureclr`, encoded with `encode_batches` and clustered with `bisect`.
+- **Retrieval.** `multilingual_retrieve` handles the request.
+  - Input over 30 words is split into sentence chunks.
+  - Each chunk is translated to English.
+  - Retrieval runs per 6-word chunk, with the idle floor.
+  - Every slot uses `blend_frames` 5.
+- **Translator.** Translation goes through a `DictTranslator` first. Its table
+  is `examples/beat-translations.json` plus the request's `translation_map`
+  and `english_text`.
+  - **Fallback.** `BEAT_TRANSLATOR=http|local` adds the package's MT client
+    behind the dictionary.
+  - **Settings.** These variables configure it: `BEAT_TRANSLATOR_URL`,
+    `BEAT_TRANSLATOR_MODEL`, `BEAT_TRANSLATOR_API`,
+    `BEAT_TRANSLATOR_API_KEY_ENV` and `BEAT_MT_MODEL_PATH`.
+  - **Missing translation.** A missing translation raises an error.
+
+### RIDGE (`ridge_gesture`)
+
+- **Rules.**
+  - **Source.** Strong rules come from `beat_semantics` and its cached
+    annotations, which carry `llm_json` or `manual_annotation` provenance.
+  - **Binding.** Each rule is bound to its phrase-timed span with
+    `align_phrase`, at least 20 frames long.
+  - **Fallback rules.** When no cached phrase occurs in the bank, the package's
+    `annotate_record` heuristic is used, with route `heuristic_rule` and
+    provenance `heuristic_annotation`.
+  - **Live extraction.** `beat_semantics --endpoint` uses the paper's verbatim
+    prompt.
+- **Retrieval.** `hybrid_retrieve` scores every 3–10-word span and accepts rule
+  spans greedily by score. The remaining words go to the fallback in chunks of
+  at most 6 words.
+- **Fallback.**
+  - **Model.** `RidgeModel` is trained by the package's `cli train` in two
+    stages, `pretrain` then `finetune --init`.
+  - **Data.** It trains on association windows only, so the bank is held out.
+  - **Early stopping.** It uses validation loss only with at least 100 pairs.
 - **Confidence.** Confidence is the softmax share of the best clip multiplied
   by vocabulary coverage. The raw cosine is reported as `similarity`.
-- **Metrics.** Reported metrics are `heldout_top1` and `heldout_chance`, where
-  bank transcript → bank motion is evaluated without training on it.
+- **Metrics.** `heldout_top1` and `heldout_chance` score bank transcript →
+  bank motion. `heldout_gca_retrieved` and `heldout_gca_ground_truth` are
+  computed with `GCA`.
+
+### Small-data caveat
+
+These are small local simulations, not benchmark reproductions. With speakers
+1–3 and one take per role, the measured signals were weak:
+
+- **Wild and Multilingual.**
+  - Held-out cross-view top-1 was 0.12, against 0.04 chance.
+  - Learned rules concentrated on 4 units for Wild and 7 for Multilingual.
+- **RIDGE.** The fallback's held-out top-1 was at chance or below.
+
+More takes or speakers, a local Sentence-BERT, or the `paper` training presets
+are needed for meaningful numbers.
 
 ## Launcher hook for paper-method preparation (phase 2)
 

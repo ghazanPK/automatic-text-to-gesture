@@ -1,6 +1,6 @@
-import {createStage} from './avatar.js?v=20261005-beat2';
-import {Speech} from './speech.js?v=20261005-beat2';
-import {MotionSequence,loadGestureLibrary} from './gesture-library.js?v=20261005-beat2';
+import {createStage} from './avatar.js?v=20261006-paper1';
+import {Speech} from './speech.js?v=20261006-paper1';
+import {MotionSequence,loadGestureLibrary} from './gesture-library.js?v=20261006-paper1';
 const stage=createStage(document.querySelector('#stage'));stage.camera.position.set(0,1.5,3.3);stage.camera.lookAt(0,.95,0);
 const speech=new Speech(stage);
 const $=s=>document.querySelector(s);
@@ -15,13 +15,29 @@ const libraryPanel=document.createElement('section');
 libraryPanel.setAttribute('aria-label','Prepared gesture library');
 libraryPanel.style.cssText='margin:1rem 0;padding:.8rem;border:1px solid #405c77;border-radius:10px';
 $('#form').after(libraryPanel);
+function formatValue(value){
+  if(typeof value==='number')return Number.isInteger(value)?String(value):value.toFixed(3);
+  if(typeof value==='string')return value;
+  if(value&&typeof value==='object'&&!Array.isArray(value)){
+    const parts=Object.entries(value).filter(([,v])=>typeof v==='number'||typeof v==='string').map(([k,v])=>`${k}=${formatValue(v)}`);
+    return parts.length?parts.join(', '):null;
+  }
+  return null;
+}
+function formatMetrics(metrics){
+  return Object.entries(metrics||{}).map(([key,value])=>[key,formatValue(value)]).filter(([,value])=>value!==null).map(([key,value])=>`${key.replaceAll('_',' ')}: ${value}`);
+}
 function renderLibrary(library){
   libraryPanel.replaceChildren();
   const title=document.createElement('strong');title.textContent='Prepared BEAT gesture bank';libraryPanel.append(title);
   if(!library){const note=document.createElement('p');note.className='small';note.textContent='Local BEAT bank unavailable. The bundled authored starter remains available.';libraryPanel.append(note);return;}
   const count=document.createElement('p');count.className='small';
-  const metrics=Object.entries(library.metrics||{}).filter(([,value])=>typeof value==='number'||typeof value==='string').map(([key,value])=>`${key.replaceAll('_',' ')}: ${typeof value==='number'&&!Number.isInteger(value)?value.toFixed(3):value}`);
+  const metrics=formatMetrics(library.metrics);
   count.textContent=`${library.clips.length} prepared clips${metrics.length?' · '+metrics.join(' · '):''} · Select an utterance to see its sequence and retrieval route.`;libraryPanel.append(count);
+  if(mode==='automatic'&&Number.isFinite(Number(library.default_threshold))&&library.default_threshold!==null){
+    $('#threshold').value=String(library.default_threshold);$('#threshold-value').textContent=Number(library.default_threshold).toFixed(2);
+    if(library.threshold_rule){const note=document.createElement('p');note.className='small';note.textContent=`Default threshold: ${library.threshold_rule}.`;libraryPanel.append(note);}
+  }
   const examples=document.createElement('div');examples.className='controls';examples.style.cssText='max-height:18rem;overflow:auto';
   for(const item of library.suggested_queries||[]){
     const query=typeof item==='string'?item:item.text||item.query;
@@ -69,7 +85,11 @@ $('#audio-input').onchange=async e=>{const file=e.target.files?.[0];if(!file)ret
 $('#form').onsubmit=async e=>{
   e.preventDefault();$('#status').textContent='Retrieving…';
   stop();
-  const params=new URLSearchParams({text:$('#query').value,threshold:$('#threshold').value,strong_rule_threshold:$('#threshold').value,seed:$('#seed').value,language:$('#language').value});
+  // Send only the controls this mode shows, so hidden defaults never override the prepared index.
+  const params=new URLSearchParams({text:$('#query').value,language:$('#language').value});
+  if(mode==='automatic')params.set('threshold',$('#threshold').value);
+  if(mode==='ridge')params.set('strong_rule_threshold',$('#threshold').value);
+  if(mode==='wild'||mode==='multilingual')params.set('seed',$('#seed').value);
   try{
     const response=await fetch('/api/query?'+params);const result=await response.json();
     if(!response.ok)throw new Error(result.error||'Retrieval failed');
@@ -87,12 +107,16 @@ $('#form').onsubmit=async e=>{
     if(result.rule_count!==undefined)pieces.push(`rules: ${result.rule_count}`);
     if(result.fallback_count!==undefined)pieces.push(`fallback: ${result.fallback_count}`);
     if(result.english_text)pieces.push(`English: ${result.english_text}`);
+    if(result.text_encoder)pieces.push(`text matching: ${result.text_encoder}`);
+    const routeCounts=formatValue(result.metrics?.route_counts);if(routeCounts)pieces.push(`routes: ${routeCounts}`);
+    for(const key of ['heldout_top1','heldout_cross_view_top1']){if(Number.isFinite(result.metrics?.[key]))pieces.push(`${key.replaceAll('_',' ')}: ${result.metrics[key].toFixed(3)} (chance ${Number(result.metrics.heldout_chance??0).toFixed(3)})`);}
     $('#summary').textContent=pieces.filter(Boolean).join(' · ');
     const table=document.createElement('table'),head=document.createElement('tr');
     ['Text','Gesture','Route / cluster','Score'].forEach(t=>{const th=document.createElement('th');th.textContent=t;head.append(th);});table.append(head);
     const routes=Array.isArray(result.trace)?result.trace:result.slots;
     routes.forEach((row,index)=>{const tr=document.createElement('tr');const route=row.route||row.source?.route||row.source||(`cluster ${row.cluster_id??'—'}`);const routeLabel=typeof route==='object'?route.name||route.type||JSON.stringify(route):route;const score=row.confidence??row.similarity;[`${index+1}. ${row.text||row.english_text||row.matched_text||''}`,row.gesture_id||row.id,routeLabel,Number.isFinite(Number(score))?Number(score).toFixed(3):'—'].forEach(value=>{const td=document.createElement('td');td.textContent=value;tr.append(td);});table.append(tr);});
-    $('#trace').replaceChildren(table);$('#status').textContent='Motion loaded.';
+    $('#trace').replaceChildren(table);
+    $('#status').textContent=result.no_match?'No rule passed the similarity floor; the avatar holds an idle pose.':(result.slots.some(slot=>slot.route==='idle_no_match')?'Motion loaded; unmatched spans hold an idle pose.':'Motion loaded.');
   }catch(error){$('#status').textContent=error.message;}
 };
 

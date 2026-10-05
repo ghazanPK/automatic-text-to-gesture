@@ -155,19 +155,198 @@ export function bindRelativeWorldRotation(sourceWorld,sourceRestWorld,targetRest
   const desired=worldDelta.multiply(targetRestWorld);
   return parentWorld.clone().invert().multiply(desired);
 }
-function channelsFor(actor,t) {
-  const f={...(actor.face||{})},n=actor.emotion,i=actor.intensity;
-  if (['joy','happy'].includes(n)){f.mouthSmileLeft=Math.max(f.mouthSmileLeft||0,.7*i);f.mouthSmileRight=Math.max(f.mouthSmileRight||0,.7*i);f.cheekSquintLeft=Math.max(f.cheekSquintLeft||0,.4*i);f.cheekSquintRight=Math.max(f.cheekSquintRight||0,.4*i);}
-  if (['surprise'].includes(n)){f.browInnerUp=Math.max(f.browInnerUp||0,.8*i);f.eyeWideLeft=Math.max(f.eyeWideLeft||0,.6*i);f.eyeWideRight=Math.max(f.eyeWideRight||0,.6*i);f.jawOpen=Math.max(f.jawOpen||0,.45*i);}
-  if (['anger','angry'].includes(n)){f.browDownLeft=Math.max(f.browDownLeft||0,.65*i);f.browDownRight=Math.max(f.browDownRight||0,.65*i);}
-  if (['sad','sadness'].includes(n)){f.browInnerUp=Math.max(f.browInnerUp||0,.5*i);f.mouthFrownLeft=Math.max(f.mouthFrownLeft||0,.5*i);f.mouthFrownRight=Math.max(f.mouthFrownRight||0,.5*i);}
-  if (actor.speaking) {
+
+// ---------------------------------------------------------------------------
+// Facial expressions: seven basic emotions, each with three authored ARKit
+// presets. Weak, medium and strong use different action-unit combinations
+// (FACS-inspired), not one shape scaled linearly. Bilateral names expand to
+// their Left/Right channels; explicit Left/Right names stay asymmetric.
+const BILATERAL=new Set(['browDown','browOuterUp','cheekSquint','eyeBlink','eyeLookDown','eyeLookUp','eyeSquint','eyeWide','mouthDimple','mouthFrown','mouthLowerDown','mouthPress','mouthSmile','mouthStretch','mouthUpperUp','noseSneer']);
+function expandPreset(preset){
+  const out={};
+  for(const [name,value] of Object.entries(preset))if(BILATERAL.has(name)){out[name+'Left']=Math.max(out[name+'Left']||0,value);out[name+'Right']=Math.max(out[name+'Right']||0,value);}
+  for(const [name,value] of Object.entries(preset))if(!BILATERAL.has(name))out[name]=value;
+  return out;
+}
+const RAW_PRESETS={
+  neutral:[
+    {},
+    {mouthClose:.04,eyeSquint:.04},
+    {mouthPress:.14,browDown:.08,eyeSquint:.1,mouthRollLower:.05}
+  ],
+  happiness:[
+    {mouthSmile:.32,cheekSquint:.14,mouthDimple:.1},
+    {mouthSmile:.58,cheekSquint:.4,eyeSquint:.2,mouthDimple:.22,mouthUpperUp:.08},
+    {mouthSmile:.88,cheekSquint:.72,eyeSquint:.42,jawOpen:.2,mouthUpperUp:.3,mouthLowerDown:.26,mouthDimple:.3,browOuterUp:.12}
+  ],
+  sadness:[
+    {browInnerUp:.36,mouthFrown:.2},
+    {browInnerUp:.62,browDown:.14,mouthFrown:.45,mouthShrugLower:.22,eyeSquint:.1,eyeLookDown:.15},
+    {browInnerUp:.88,browDown:.3,mouthFrown:.72,mouthShrugLower:.45,mouthPress:.22,mouthStretch:.14,eyeSquint:.24,eyeBlink:.22,eyeLookDown:.3}
+  ],
+  anger:[
+    {browDown:.36,eyeSquint:.16,mouthPress:.16},
+    {browDown:.66,eyeSquint:.3,eyeWide:.12,mouthPress:.36,noseSneer:.22,mouthRollLower:.12},
+    {browDown:.95,noseSneer:.46,eyeWide:.26,eyeSquint:.34,mouthUpperUp:.32,mouthStretch:.3,mouthFrown:.3,mouthLowerDown:.22,jawForward:.15}
+  ],
+  disgust:[
+    {noseSneer:.32,mouthUpperUp:.16,browDown:.1},
+    {noseSneer:.62,mouthUpperUp:.36,cheekSquint:.25,browDown:.3,mouthFrown:.2,mouthShrugUpper:.22},
+    {noseSneer:.9,mouthUpperUpLeft:.7,mouthUpperUpRight:.5,cheekSquint:.5,eyeSquint:.35,browDown:.46,mouthFrown:.4,mouthShrugLower:.35,mouthLeft:.12,jawOpen:.05}
+  ],
+  fear:[
+    {browInnerUp:.42,eyeWide:.26,mouthStretch:.1},
+    {browInnerUp:.7,browOuterUp:.3,browDown:.15,eyeWide:.52,mouthStretch:.36,jawOpen:.1},
+    {browInnerUp:.95,browOuterUp:.52,browDown:.26,eyeWide:.86,mouthStretch:.66,jawOpen:.3,mouthLowerDown:.32,mouthFrown:.18}
+  ],
+  surprise:[
+    {browInnerUp:.36,browOuterUp:.32,eyeWide:.22},
+    {browInnerUp:.66,browOuterUp:.62,eyeWide:.52,jawOpen:.2,mouthFunnel:.1},
+    {browInnerUp:.95,browOuterUp:.92,eyeWide:.86,jawOpen:.5,mouthFunnel:.22,mouthLowerDown:.12}
+  ]
+};
+export const EXPRESSION_PRESETS=Object.freeze(Object.fromEntries(Object.entries(RAW_PRESETS).map(([name,levels])=>[name,Object.freeze(levels.map(level=>Object.freeze(expandPreset(level))))])));
+export const EMOTIONS=Object.freeze(Object.keys(EXPRESSION_PRESETS));
+export const EMOTION_ALIASES=Object.freeze({joy:'happiness',happy:'happiness',joyful:'happiness',angry:'anger',mad:'anger',sad:'sadness',scared:'fear',afraid:'fear',fearful:'fear',disgusted:'disgust',surprised:'surprise',calm:'neutral',none:'neutral'});
+// Intensity anchors for neutral(0), weak, medium and strong.
+export const EXPRESSION_LEVEL_INTENSITY=Object.freeze([0,.3,.6,1]);
+export function normalizeEmotion(name){
+  const n=String(name??'neutral').toLowerCase().trim();
+  return EXPRESSION_PRESETS[n]?n:EMOTION_ALIASES[n]||'neutral';
+}
+const LEVEL_WORDS={weak:1,low:1,mild:1,subtle:1,slight:1,medium:2,moderate:2,mid:2,strong:3,high:3,intense:3,extreme:3};
+// Integers 1, 2, 3 (or weak/medium/strong) select a preset; fractional
+// numbers in [0,1] are a continuous intensity blended between presets.
+export function expressionIntensity(level){
+  if(typeof level==='string'){const word=LEVEL_WORDS[level.toLowerCase().trim()];if(word)return EXPRESSION_LEVEL_INTENSITY[word];level=Number(level);}
+  if(level&&typeof level==='object'&&'level' in level)return expressionIntensity(Math.round(Number(level.level)||0)||0);
+  const n=Number(level);
+  if(!Number.isFinite(n))return EXPRESSION_LEVEL_INTENSITY[2];
+  if(Number.isInteger(n)&&n>=1&&n<=3)return EXPRESSION_LEVEL_INTENSITY[n];
+  return clamp(n);
+}
+export function expressionChannels(name='neutral',intensity=.6){
+  const presets=EXPRESSION_PRESETS[normalizeEmotion(name)],i=clamp(intensity),anchors=EXPRESSION_LEVEL_INTENSITY;
+  const stops=[{},...presets];
+  let k=0;while(k<anchors.length-2&&i>anchors[k+1])k++;
+  const t=(i-anchors[k])/(anchors[k+1]-anchors[k]),a=stops[k],b=stops[k+1],out={};
+  for(const channel of new Set([...Object.keys(a),...Object.keys(b)])){
+    const value=(a[channel]||0)*(1-t)+(b[channel]||0)*t;
+    if(value>1e-4)out[channel]=value;
+  }
+  return out;
+}
+
+const MOUTH_SHAPE=/^(jawOpen|jawForward|mouthFunnel|mouthPucker|mouthLowerDown|mouthStretch|mouthClose|mouthRoll|mouthPress|mouthShrug)/;
+// Compose recorded face data, emotion, blink and speech mouth channels.
+export function composeFaceChannels(actor){
+  const f={...(actor.face||{})};
+  const lipSync=Boolean(actor.speaking&&actor.visemes);
+  const expression=actor.expressionCurrent||expressionChannels(actor.emotion,actor.intensity);
+  for(const [channel,value] of Object.entries(expression)){
+    // Visemes own the jaw and lip aperture while speaking; keep the emotional
+    // brows, eyes, cheeks and smile, and only a trace of the mouth shape.
+    const v=lipSync&&MOUTH_SHAPE.test(channel)?value*.35:value;
+    f[channel]=Math.max(f[channel]||0,v);
+  }
+  const blink=clamp(actor.blinkValue);
+  if(blink>0)for(const side of ['Left','Right']){
+    f['eyeBlink'+side]=Math.max(f['eyeBlink'+side]||0,blink);
+    if(f['eyeWide'+side])f['eyeWide'+side]*=1-blink;
+  }
+  if(lipSync){
+    for(const [channel,value] of Object.entries(actor.visemes))f[channel]=Math.max(f[channel]||0,clamp(value));
+  }else if(actor.speaking){
     // This is an approximate animated speaking envelope, not phoneme alignment.
     const pulse=clamp(actor.speechLevel ?? .08);
     f.jawOpen=Math.max(f.jawOpen||0,pulse*.55);
     f.viseme_aa=Math.max(f.viseme_aa||0,pulse*.3);
   }
   return f;
+}
+
+// ---------------------------------------------------------------------------
+// Small rig helpers shared by IK, gaze, idle and posture overlays.
+const worldPosition=object=>object.getWorldPosition(new THREE.Vector3());
+export function rotateBoneWorld(bone,axis,angle){
+  if(!bone?.parent||!angle||axis.lengthSq()<1e-10)return false;
+  const parentWorld=bone.parent.getWorldQuaternion(new THREE.Quaternion());
+  const delta=new THREE.Quaternion().setFromAxisAngle(axis.clone().normalize(),angle);
+  bone.quaternion.premultiply(parentWorld.clone().invert().multiply(delta).multiply(parentWorld));
+  bone.updateMatrixWorld(true);return true;
+}
+// Analytic two-bone IK in world space. The middle joint bends in the plane
+// containing the pole hint; unreachable targets extend the limb toward them.
+export function solveTwoBoneIK(upper,lower,end,target,pole=null,weight=1){
+  weight=clamp(weight);
+  if(!upper?.parent||!lower||!end||!target||weight<=0)return false;
+  const a=worldPosition(upper),b=worldPosition(lower),c=worldPosition(end);
+  const l1=a.distanceTo(b),l2=b.distanceTo(c),toTarget=target.clone().sub(a);
+  let d=toTarget.length();
+  if(l1<1e-6||l2<1e-6||d<1e-6)return false;
+  const dir=toTarget.divideScalar(d);
+  d=Math.max(Math.abs(l1-l2)+1e-4,Math.min(l1+l2-1e-4,d));
+  const orthogonal=v=>v.addScaledVector(dir,-v.dot(dir));
+  let bend=orthogonal(pole?pole.clone().sub(a):b.clone().sub(a));
+  if(bend.lengthSq()<1e-8)bend=orthogonal(b.clone().sub(a));
+  if(bend.lengthSq()<1e-8)bend=orthogonal(Math.abs(dir.y)<.9?new THREE.Vector3(0,-1,0):new THREE.Vector3(0,0,1));
+  bend.normalize();
+  const cosine=Math.max(-1,Math.min(1,(l1*l1+d*d-l2*l2)/(2*l1*d))),sine=Math.sqrt(1-cosine*cosine);
+  const joint=a.clone().addScaledVector(dir,l1*cosine).addScaledVector(bend,l1*sine);
+  const reach=a.clone().addScaledVector(dir,d);
+  const upperStart=upper.quaternion.clone(),lowerStart=lower.quaternion.clone();
+  aimBoneToward(upper,lower,joint.clone().sub(a));
+  aimBoneToward(lower,end,reach.sub(worldPosition(lower)));
+  if(weight<1){
+    const upperSolved=upper.quaternion.clone(),lowerSolved=lower.quaternion.clone();
+    upper.quaternion.copy(upperStart).slerp(upperSolved,weight);lower.quaternion.copy(lowerStart).slerp(lowerSolved,weight);
+    upper.updateMatrixWorld(true);
+  }
+  return true;
+}
+function resolvePoint(target,camera=null){
+  if(target==null)return null;
+  if(target==='camera')return camera?worldPosition(camera):null;
+  if(target.isObject3D)return worldPosition(target);
+  if(target.isVector3)return target.clone();
+  if(Array.isArray(target)&&target.length>=3&&target.slice(0,3).every(Number.isFinite))return new THREE.Vector3(target[0],target[1],target[2]);
+  if(typeof target==='object'&&['x','y','z'].every(k=>Number.isFinite(target[k])))return new THREE.Vector3(target.x,target.y,target.z);
+  return null;
+}
+// Depth-only silhouette geometry hides avatar parts behind real objects.
+export function makeOccluder(object,{renderOrder=-10}={}){
+  object?.traverse?.(o=>{
+    if(!o.isMesh)return;
+    const source=Array.isArray(o.material)?o.material:[o.material];
+    const materials=source.map(m=>new THREE.MeshBasicMaterial({colorWrite:false,depthWrite:true,depthTest:true,side:m?.side??THREE.FrontSide}));
+    if(!o.userData.occluder)o.userData.originalMaterial=o.material;
+    o.material=Array.isArray(o.material)?materials:materials[0];
+    o.renderOrder=renderOrder;o.userData.occluder=true;
+  });
+  return object;
+}
+function measureModel(model){
+  // Measured before the model joins the actor root: coordinates are actor-local.
+  model.updateMatrixWorld(true);
+  const box=new THREE.Box3().setFromObject(model),bones=new Map();
+  model.traverse(o=>{if(o.isBone&&!bones.has(key(o.name)))bones.set(key(o.name),o);});
+  const y=name=>bones.has(name)?worldPosition(bones.get(name)).y:null;
+  const forward=new THREE.Vector3(0,0,1),forwardLocal=new Map();
+  for(const name of ['neck','head']){const bone=bones.get(name);if(bone)forwardLocal.set(bone,forward.clone().applyQuaternion(bone.getWorldQuaternion(new THREE.Quaternion()).invert()));}
+  const height=Math.max(.5,box.max.y-Math.min(0,box.min.y));
+  const feet=[y('leftfoot'),y('rightfoot')].filter(v=>v!==null);
+  return {box,height,hipsY:y('hips')??height*.53,ankleY:feet.length?feet.reduce((a,b)=>a+b,0)/feet.length:height*.05,forwardLocal,
+    base:{position:model.position.clone(),quaternion:model.quaternion.clone()}};
+}
+function createRig(model,metrics){
+  const rig={model,bones:new Map(),bind:new Map(),restWorld:new Map(),morphs:[],morphDefaults:new Map(),morphKeys:new Map(),metrics};
+  model.traverse(o=>{
+    if(o.isBone){const name=key(o.name);if(!rig.bones.has(name))rig.bones.set(name,o);rig.bind.set(o,o.quaternion.clone());}
+    if(o.isMesh){o.frustumCulled=false;if(o.morphTargetDictionary&&o.morphTargetInfluences){rig.morphs.push(o);rig.morphDefaults.set(o,o.morphTargetInfluences.slice());
+      rig.morphKeys.set(o,Object.entries(o.morphTargetDictionary).map(([name,index])=>[morphName(name),index]).filter(([name])=>/^(brow|cheek|eye|jaw|mouth|nose|tongue|viseme)/.test(name)));}}
+  });
+  for(const bone of rig.bind.keys())rig.restWorld.set(bone,bone.getWorldQuaternion(new THREE.Quaternion()));
+  return rig;
 }
 
 // World-space anatomical directions avoid assuming that imported skinning
@@ -195,6 +374,15 @@ export function applyGesturePose(rig,name='idle',t=0){
   if(/nod|yes|agree/.test(n)){const head=rig.bones.get('head');if(head)head.quaternion.multiply(new THREE.Quaternion().setFromEuler(new THREE.Euler(.1*Math.sin(t*4),0,0)));}
 }
 
+const AUTO_SIT=/(^|[^a-z])(sit|sits|sitting|seated|sit_down)([^a-z]|$)/,AUTO_LIE=/(^|[^a-z])(lie|lies|lying|lie_down|sleep|sleeping)([^a-z]|$)/;
+const smoothstep=x=>{x=Math.max(0,Math.min(1,x));return x*x*(3-2*x);};
+export function blinkCurve(elapsed){
+  if(!(elapsed>=0))return 0;
+  if(elapsed<.07)return smoothstep(elapsed/.07);
+  if(elapsed<.1)return 1;
+  return elapsed<.22?1-smoothstep((elapsed-.1)/.12):0;
+}
+
 export function createStage(container, options={}) {
   const scene=new THREE.Scene();scene.background=new THREE.Color(options.background||'#101827');
   const camera=new THREE.PerspectiveCamera(42,1,.01,100);camera.position.set(0,1.6,5.8);camera.lookAt(0,1.15,0);
@@ -205,8 +393,14 @@ export function createStage(container, options={}) {
   scene.add(new THREE.HemisphereLight(0xe6f4ff,0x344055,2.4));const light=new THREE.DirectionalLight(0xffffff,2);light.position.set(3,5,4);scene.add(light);
   const floor=new THREE.Mesh(new THREE.PlaneGeometry(20,20),new THREE.MeshStandardMaterial({color:0x182438,roughness:.9}));floor.rotation.x=-Math.PI/2;scene.add(floor);
   const grid=new THREE.GridHelper(12,24,0x405575,0x24344b);grid.position.y=.002;scene.add(grid);
-  const actors=[],props=new Map(),clock=new THREE.Clock(),loader=new GLTFLoader();let raf,disposed=false;
+  const actors=[],props=new Map(),clock=new THREE.Clock(),loader=new GLTFLoader();let raf,disposed=false,lastTime=0;
   const modelChoices={rowan:new URL('./avatars/rowan.glb',import.meta.url).href,mira:new URL('./avatars/mira.glb',import.meta.url).href};
+  const defaultIdle=()=>options.idle===false?{blink:false,breath:false,head:false}:{blink:true,breath:true,head:true,...(typeof options.idle==='object'?options.idle:{})};
+  function attachModel(actor,model){
+    const metrics=measureModel(model);
+    actor.root.add(model);model.updateMatrixWorld(true);
+    return createRig(model,metrics);
+  }
   function makeAvatar(color=0x60c8d9,x=0,z=0,avatarUrl=options.avatarUrl===undefined?new URL('./avatars/rowan.glb',import.meta.url).href:options.avatarUrl) {
     const root=new THREE.Group();root.position.set(x,0,z);scene.add(root);
     const procedural=new THREE.Group();root.add(procedural);
@@ -219,21 +413,16 @@ export function createStage(container, options={}) {
     const mouth=mesh(new THREE.SphereGeometry(.06,16,8),dark,head,[0,-.085,.225]);mouth.scale.set(1,.15,.25);
     function limb(x,y,length){const pivot=new THREE.Group();pivot.position.set(x,y,0);procedural.add(pivot);mesh(new THREE.CapsuleGeometry(.065,length,4,8),mat,pivot,[0,-length/2,0]);return pivot;}
     const arms=[limb(-.32,1.52,.58),limb(.32,1.52,.58)],legs=[limb(-.13,.76,.65),limb(.13,.76,.65)];
-    const actor={root,procedural,head,arms,legs,mouth,eyes,brows,gesture:'idle',emotion:'neutral',intensity:.5,speaking:false,walking:false,face:null,move:null,rig:null,loadError:null};
+    const actor={root,procedural,head,arms,legs,mouth,eyes,brows,gesture:'idle',emotion:'neutral',intensity:.5,speaking:false,walking:false,face:null,move:null,rig:null,loadError:null,
+      idle:defaultIdle(),phase:Math.random()*20,blinkStart:-1,blinkNext:null,blinkValue:0,visemes:null,reach:{},gaze:null,posture:undefined,overlayBase:null,expressionCurrent:null};
     actors.push(actor);
     const request=actor.loadRequest=1;
     actor.ready=avatarUrl?new Promise(resolve=>loader.load(avatarUrl,gltf=>{
       if(disposed){disposeObject(gltf.scene);resolve({loaded:false,error:new Error('Stage disposed')});return;}
       if(request!==actor.loadRequest){disposeObject(gltf.scene);resolve({loaded:false,stale:true,actor});return;}
-      const model=gltf.scene;root.add(model);model.updateMatrixWorld(true);
-      const rig={model,bones:new Map(),bind:new Map(),restWorld:new Map(),morphs:[],morphDefaults:new Map()};
-      model.traverse(o=>{
-        if(o.isBone){const name=key(o.name);if(!rig.bones.has(name))rig.bones.set(name,o);rig.bind.set(o,o.quaternion.clone());}
-        if(o.isMesh){o.frustumCulled=false;if(o.morphTargetDictionary&&o.morphTargetInfluences){rig.morphs.push(o);rig.morphDefaults.set(o,o.morphTargetInfluences.slice());}}
-      });
-      for(const bone of rig.bind.keys())rig.restWorld.set(bone,bone.getWorldQuaternion(new THREE.Quaternion()));
+      const rig=attachModel(actor,gltf.scene);
       if(actor.rig){root.remove(actor.rig.model);disposeObject(actor.rig.model);}
-      actor.rig=rig;actor.loadError=null;procedural.visible=false;resolve({loaded:true,actor});
+      actor.rig=rig;actor.overlayBase=null;actor.loadError=null;procedural.visible=false;resolve({loaded:true,actor});
     },undefined,error=>{if(request===actor.loadRequest){actor.loadError=error;console.error(`Avatar could not load: ${avatarUrl}`,error);options.onAvatarError?.(error,actor);}resolve({loaded:false,error,actor});})):Promise.resolve({loaded:false,actor});
     return actor;
   }
@@ -247,11 +436,8 @@ export function createStage(container, options={}) {
     actor.ready=new Promise(resolve=>loader.load(url,gltf=>{
       if(disposed){disposeObject(gltf.scene);resolve({loaded:false,error:new Error('Stage disposed'),actor});return;}
       if(request!==actor.loadRequest){disposeObject(gltf.scene);resolve({loaded:false,stale:true,actor});return;}
-      const model=gltf.scene;actor.root.add(model);model.updateMatrixWorld(true);
-      const rig={model,bones:new Map(),bind:new Map(),restWorld:new Map(),morphs:[],morphDefaults:new Map()};
-      model.traverse(o=>{if(o.isBone){const name=key(o.name);if(!rig.bones.has(name))rig.bones.set(name,o);rig.bind.set(o,o.quaternion.clone());}if(o.isMesh){o.frustumCulled=false;if(o.morphTargetDictionary&&o.morphTargetInfluences){rig.morphs.push(o);rig.morphDefaults.set(o,o.morphTargetInfluences.slice());}}});
-      for(const bone of rig.bind.keys())rig.restWorld.set(bone,bone.getWorldQuaternion(new THREE.Quaternion()));
-      if(actor.rig){actor.root.remove(actor.rig.model);disposeObject(actor.rig.model);}actor.rig=rig;actor.procedural.visible=false;actor.loadError=null;resolve({loaded:true,actor});
+      const rig=attachModel(actor,gltf.scene);
+      if(actor.rig){actor.root.remove(actor.rig.model);disposeObject(actor.rig.model);}actor.rig=rig;actor.overlayBase=null;actor.procedural.visible=false;actor.loadError=null;resolve({loaded:true,actor});
     },undefined,error=>{if(request===actor.loadRequest){actor.loadError=error;console.error(`Avatar could not load: ${url}`,error);options.onAvatarError?.(error,actor);}resolve({loaded:false,error,actor});}));
     return actor.ready;
   }
@@ -268,8 +454,22 @@ export function createStage(container, options={}) {
     bones.forEach((o,i)=>{o.visible=i<edges.length;if(o.visible)o.geometry.setFromPoints([vectors[edges[i][0]],vectors[edges[i][1]]]);});
     avatar.root.visible=false;
   }
+  // Overlays (idle, IK, gaze, seated legs) are layered on the current base pose
+  // each frame. The base is restored before the next frame or the next clip
+  // frame, so overlays never accumulate on recorded motion.
+  function restoreOverlay(actor){
+    if(!actor.overlayBase)return;
+    for(const [bone,value] of actor.overlayBase)bone.quaternion.copy(value);
+    actor.overlayBase=null;actor.rig?.model.updateMatrixWorld(true);
+  }
+  function overlay(actor,...names){
+    const list=[];
+    for(const name of names){const bone=actor.rig.bones.get(name);if(!bone)continue;if(!actor.overlayBase.has(bone))actor.overlayBase.set(bone,bone.quaternion.clone());list.push(bone);}
+    return list;
+  }
   function setMotionFrame(frame,actor=avatar,source={}){
     if(!actor.rig||!frame)return false;
+    restoreOverlay(actor);
     const rotations=frame.quaternions||frame.rotations||frame.rotation6d||[];
     const names=frame.jointNames||frame.joint_order||source.jointNames||source.joint_order||[];
     const type=frame.rotation6d?'rotation6d':'quaternion';
@@ -305,11 +505,14 @@ export function createStage(container, options={}) {
     // source twist. Quaternion-only inputs keep the explicit delta path above.
     if(Array.isArray(frame.positions)&&setPosePositions(frame.positions,names,actor,{basis:source.restBasis,axisSigns:signs}))applied=Math.max(1,applied);
     actor.motionActive=applied>0;
-    if(frame.rootTranslation){const p=new THREE.Vector3(...frame.rootTranslation.map((v,i)=>(Number(v)||0)*signs[i])).applyQuaternion(basis);actor.root.position.copy(p);}
+    // An explicit seat or bed anchors the root; clip root travel would slide the actor off it.
+    const anchored=['sit','lie'].includes(actor.posture?.type);
+    if(frame.rootTranslation&&!anchored){const p=new THREE.Vector3(...frame.rootTranslation.map((v,i)=>(Number(v)||0)*signs[i])).applyQuaternion(basis);actor.root.position.copy(p);}
     return applied>0;
   }
   function setPosePositions(joints,jointNames,actor=avatar,options={}){
     if(!actor.rig||!Array.isArray(joints)||!Array.isArray(jointNames))return false;
+    restoreOverlay(actor);
     const positions=new Map();
     for(let i=0;i<jointNames.length;i++){
       const p=joints[i];if(p?.length>=3&&p.every(Number.isFinite))positions.set(key(jointNames[i]),new THREE.Vector3(...p));
@@ -353,20 +556,249 @@ export function createStage(container, options={}) {
     actor.motionActive=applied>0;
     return applied>0;
   }
-  function clearMotion(actor=avatar){actor.motionActive=false;if(actor.rig)for(const [bone,bind] of actor.rig.bind)bone.quaternion.copy(bind);}
-  function expression(name='neutral',intensity=.5,actor=avatar){actor.emotion=name;actor.intensity=clamp(intensity);}
+  function clearMotion(actor=avatar){actor.motionActive=false;actor.overlayBase=null;if(actor.rig)for(const [bone,bind] of actor.rig.bind)bone.quaternion.copy(bind);}
+  function expression(name='neutral',intensity=.5,actor=avatar){actor.emotion=name;actor.intensity=clamp(intensity);actor.expressionLevel=null;}
+  // setExpression('anger',2) selects the medium preset; .45 blends weak→medium.
+  function setExpression(name='neutral',level=2,actor=avatar){
+    actor.emotion=normalizeEmotion(name);actor.intensity=expressionIntensity(level);
+    const index=EXPRESSION_LEVEL_INTENSITY.indexOf(actor.intensity);actor.expressionLevel=index>0?index:null;
+    return {emotion:actor.emotion,intensity:actor.intensity,level:actor.expressionLevel};
+  }
   function gesture(name='idle',actor=avatar,time=null){actor.gesture=name;actor.gestureTime=time;}
   function pointAt(point,actor=avatar){actor.pointTarget=new THREE.Vector3(...point);actor.gesture='aim_target';}
-  function setSpeech(value,actor=avatar){actor.speaking=Boolean(value);}
+  function setSpeech(value,actor=avatar){actor.speaking=Boolean(value);if(!actor.speaking)actor.visemes=null;}
   function setSpeechLevel(value,actor=avatar){actor.speechLevel=clamp(value);}
+  // Phoneme-timed mouth weights, e.g. {viseme_aa:.8,jawOpen:.2}; null returns to
+  // the amplitude envelope. Weights are only rendered while speaking.
+  function setVisemes(weights,actor=avatar){actor.visemes=weights&&typeof weights==='object'?{...weights}:null;}
   function setFaceChannels(channels,actor=avatar){actor.face=channels;}
+  function setIdle(value=true,actor=avatar){
+    const current=actor.idle||{};
+    actor.idle=typeof value==='object'&&value?{...current,...value}:{blink:Boolean(value),breath:Boolean(value),head:Boolean(value)};
+    if(!actor.idle.blink)actor.blinkValue=0;
+    return {...actor.idle};
+  }
+  function blink(actor=avatar){actor.blinkStart=clock.elapsedTime;actor.blinkNext=clock.elapsedTime+2+Math.random()*3;}
+  const isActor=value=>Boolean(value&&typeof value==='object'&&value.root?.isObject3D&&'reach' in value);
+  // Two-bone IK: reachTo('left'|'right'|'auto', point|Object3D|null, {weight,pole}).
+  // Short form: reachTo(point|null, actor) = reachTo('auto', point, {}, actor).
+  function reachTo(side,point,options={},actor=avatar){
+    if(side!=='left'&&side!=='right'&&side!=='auto'&&side!==undefined&&side!==''){
+      actor=isActor(point)?point:avatar;point=side;side='auto';options={};
+    }
+    if(isActor(options)){actor=options;options={};}
+    const {weight=1,pole=null,immediate=false}=options||{};
+    const auto=side==='auto'||!side;
+    if(auto){
+      if(point==null){for(const s of ['left','right'])reachTo(s,null,{immediate},actor);return null;}
+      const p=resolvePoint(point,camera);
+      side=p&&actor.root.worldToLocal(p.clone()).x<0?'right':'left';
+      // A per-frame caller may switch sides; release the other hand smoothly.
+      const other=side==='left'?'right':'left';if(actor.reach[other]?.auto)actor.reach[other].weight=0;
+    }
+    side=side==='right'?'right':'left';
+    const entry=actor.reach[side];
+    if(point==null){if(entry){entry.weight=0;if(immediate)delete actor.reach[side];}return null;}
+    actor.reach[side]={target:point,pole,weight:clamp(weight),blend:immediate?clamp(weight):(entry?.blend||0),auto};
+    return side;
+  }
+  function clearReach(actor=avatar){actor.reach={};}
+  // Head/neck gaze toward a world point, an Object3D (followed each frame) or 'camera'.
+  // Short form: lookAt(point|null, actor) uses weight 1.
+  function lookAt(target,weight=1,actor=avatar){
+    if(typeof weight!=='number'){actor=isActor(weight)?weight:actor;weight=1;}
+    if(target==null){if(actor.gaze)actor.gaze.weight=0;return;}
+    actor.gaze={target,weight:clamp(weight),blend:actor.gaze?.blend||0,point:actor.gaze?.point||null};
+  }
+  function setFacing(direction,actor=avatar){
+    let angle=direction;
+    if(typeof direction!=='number'){
+      const p=resolvePoint(direction,camera);if(!p)return null;
+      const origin=worldPosition(actor.root);angle=Math.atan2(p.x-origin.x,p.z-origin.z);
+    }
+    actor.root.rotation.y=angle;return angle;
+  }
+  function placeRoot(position,actor){
+    if(!position)return;
+    const p=Array.isArray(position)?(position.length>=3?new THREE.Vector3(position[0],0,position[2]):new THREE.Vector3(position[0],0,position[1])):resolvePoint(position,camera);
+    if(p){actor.root.position.x=p.x;actor.root.position.z=p.z;}
+  }
+  // Seated posture: lowers the whole character so the hips rest at seatHeight
+  // (world metres) and solves both legs to plant the feet on the floor. It holds
+  // while recorded/BEAT clips drive the upper body. Short forms: sit(metres,
+  // actor) keeps the current position and facing; sit(null, actor) stands.
+  function sit(options={},actor=avatar){
+    if(isActor(options)){actor=options;options={};}
+    if(options===null)return stand(actor);
+    if(typeof options==='number'||typeof options==='string')options={seatHeight:Number(options)};
+    const {seatHeight=.45,position=null,facing=null,footForward=null,floorHeight=0,handsOnLap=true}=options;
+    placeRoot(position,actor);if(facing!=null)setFacing(facing,actor);
+    actor.posture={type:'sit',seatHeight:Number.isFinite(Number(seatHeight))?Number(seatHeight):.45,footForward,floorHeight:Number(floorHeight)||0,handsOnLap};
+    return actor.posture;
+  }
+  // Lying posture on a surface top: 'back', 'left' or 'right' side; head points
+  // along headDirection (world XZ vector or yaw angle).
+  function lie({surfaceHeight=0,side='back',headDirection=[-1,0,0],position=null}={},actor=avatar){
+    placeRoot(position,actor);
+    actor.posture={type:'lie',surfaceHeight:Number(surfaceHeight)||0,side,headDirection};
+    return actor.posture;
+  }
+  function stand(actor=avatar){actor.posture={type:'stand'};return actor.posture;}
+  function setPosture(posture,actor=avatar){actor.posture=posture==null||posture==='auto'?undefined:posture;return actor.posture;}
   function moveTo(x,z,duration=1,actor=avatar){actor.move={start:clock.elapsedTime,from:actor.root.position.clone(),to:new THREE.Vector3(x,0,z),duration:Math.max(.01,duration)};}
   function addProp(name,x,z,color=0xe0b572,size=[.55,.65,.55]){if(props.has(name))scene.remove(props.get(name));const o=new THREE.Mesh(new THREE.BoxGeometry(...size),new THREE.MeshStandardMaterial({color}));o.position.set(x,size[1]/2,z);scene.add(o);props.set(name,o);return o;}
   const resize=new ResizeObserver(()=>{const w=Math.max(1,container.clientWidth),h=Math.max(260,container.clientHeight);renderer.setSize(w,h,false);camera.aspect=w/h;camera.updateProjectionMatrix();});resize.observe(container);
-  function animate(){if(disposed)return;const t=clock.getElapsedTime();for(const a of actors){
+
+  function activePosture(a){
+    if(a.posture)return a.posture.type==='stand'?null:a.posture;
+    const g=String(a.gesture||'').toLowerCase();
+    if(AUTO_SIT.test(g))return {type:'sit',seatHeight:.45,floorHeight:0,handsOnLap:true,auto:true};
+    if(AUTO_LIE.test(g))return {type:'lie',surfaceHeight:0,side:'back',headDirection:[-1,0,0],auto:true};
+    return null;
+  }
+  function applyPostureTransform(a,posture){
+    const rig=a.rig,{base,box,hipsY,height}=rig.metrics;
+    rig.model.position.copy(base.position);rig.model.quaternion.copy(base.quaternion);
+    if(posture?.type==='sit'){
+      // The ischial contact sits roughly 0.1 m (scaled by stature) below the hip joints.
+      const rootY=worldPosition(a.root).y;
+      rig.model.position.y+=posture.seatHeight-rootY+.1*height/1.75-hipsY;
+    }else if(posture?.type==='lie'){
+      let yaw=posture.headDirection;
+      if(typeof yaw!=='number'){
+        const d=resolvePoint(Array.isArray(yaw)&&yaw.length===2?[yaw[0],0,yaw[1]]:yaw)||new THREE.Vector3(-1,0,0);
+        d.applyQuaternion(a.root.getWorldQuaternion(new THREE.Quaternion()).invert());yaw=Math.atan2(-d.x,-d.z);
+      }
+      const roll=posture.side==='left'?-Math.PI/2:posture.side==='right'?Math.PI/2:0;
+      const q=new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI/2,0,0)).premultiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,0,1),roll)).premultiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),yaw));
+      const corners=[];for(const x of [box.min.x,box.max.x])for(const y of [box.min.y,box.max.y])for(const z of [box.min.z,box.max.z])corners.push(new THREE.Vector3(x,y,z).applyQuaternion(q));
+      const rotated=new THREE.Box3().setFromPoints(corners),center=rotated.getCenter(new THREE.Vector3());
+      rig.model.quaternion.premultiply(q);
+      rig.model.position.applyQuaternion(q).add(new THREE.Vector3(-center.x,posture.surfaceHeight-worldPosition(a.root).y-rotated.min.y,-center.z));
+    }
+    rig.model.updateMatrixWorld(true);
+  }
+  function applyIdle(a,t){
+    const idle=a.idle,rig=a.rig;if(!idle||a.motionActive)return;
+    const basis=rig.model.getWorldQuaternion(new THREE.Quaternion()),up=new THREE.Vector3(0,1,0).applyQuaternion(basis),right=new THREE.Vector3(1,0,0).applyQuaternion(basis),forward=new THREE.Vector3(0,0,1).applyQuaternion(basis);
+    if(idle.breath){
+      const breath=Math.sin(t*Math.PI*2/4.2+a.phase);
+      const [chest]=overlay(a,rig.bones.has('upperchest')?'upperchest':'chest');
+      if(chest)rotateBoneWorld(chest,right,-.012*breath);
+      const lift=.014*Math.max(0,breath);
+      const [left]=overlay(a,'leftshoulder'),[rightShoulder]=overlay(a,'rightshoulder');
+      if(left)rotateBoneWorld(left,forward,lift);
+      if(rightShoulder)rotateBoneWorld(rightShoulder,forward,-lift);
+    }
+    if(idle.head){
+      const scale=1-.7*(a.gaze?.blend||0),p=a.phase;
+      const [head]=overlay(a,'head');
+      if(head){
+        rotateBoneWorld(head,up,scale*(.03*Math.sin(t*.29+p)+.012*Math.sin(t*.83+2*p)));
+        rotateBoneWorld(head,right,scale*(.018*Math.sin(t*.37+1.7*p)+.008*Math.sin(t*1.13+p)));
+      }
+    }
+  }
+  function armPole(a,side){
+    const rig=a.rig,basis=rig.model.getWorldQuaternion(new THREE.Quaternion()),shoulder=worldPosition(rig.bones.get(side+'arm')),s=rig.metrics.height/1.75;
+    return shoulder.add(new THREE.Vector3(side==='left'?.3:-.3,-.6,-.35).multiplyScalar(s).applyQuaternion(basis));
+  }
+  function applyLegs(a,posture){
+    if(posture?.type!=='sit')return;
+    const rig=a.rig;
+    // Recorded/BEAT clips fit a standing pelvis and legs; the seat owns them.
+    // The pelvis returns to its bind orientation, the clip keeps the upper body.
+    // The spine is counter-rotated so the clip's upper-body world pose is kept.
+    if(a.motionActive){
+      const [hips]=overlay(a,'hips'),[spine]=overlay(a,'spine');
+      if(hips){
+        const clip=hips.quaternion.clone(),bind=rig.bind.get(hips);
+        hips.quaternion.copy(bind);
+        if(spine?.parent===hips)spine.quaternion.premultiply(bind.clone().invert().multiply(clip));
+        hips.updateMatrixWorld(true);
+      }
+    }
+    const basis=rig.model.getWorldQuaternion(new THREE.Quaternion()),forward=new THREE.Vector3(0,0,1).applyQuaternion(basis),floorY=posture.floorHeight+rig.metrics.ankleY;
+    for(const side of ['left','right']){
+      const [thigh,knee]=overlay(a,side+'upleg',side+'leg'),foot=rig.bones.get(side+'foot');
+      if(!thigh||!knee||!foot)continue;
+      const hip=worldPosition(thigh),l1=hip.distanceTo(worldPosition(knee));
+      const target=hip.clone().addScaledVector(forward,posture.footForward??l1*.95);target.y=floorY;
+      solveTwoBoneIK(thigh,knee,foot,target,hip.clone().addScaledVector(forward,2).add(new THREE.Vector3(0,.6,0)),1);
+    }
+    if(posture.handsOnLap&&!a.motionActive&&/^(idle|sit|sitting|seated|sit_down|)$/.test(String(a.gesture||'').toLowerCase())){
+      for(const side of ['left','right']){
+        if(a.reach[side])continue;
+        const thigh=rig.bones.get(side+'upleg'),knee=rig.bones.get(side+'leg'),[upper,lower]=overlay(a,side+'arm',side+'forearm'),hand=rig.bones.get(side+'hand');
+        if(!thigh||!knee||!upper||!lower||!hand)continue;
+        const lap=worldPosition(thigh).lerp(worldPosition(knee),.55).add(new THREE.Vector3(0,.09*rig.metrics.height/1.75,0));
+        solveTwoBoneIK(upper,lower,hand,lap,armPole(a,side),.9);
+      }
+    }
+  }
+  function applyReach(a,dt){
+    const rate=1-Math.exp(-dt*8);
+    for(const side of ['left','right']){
+      const r=a.reach[side];if(!r)continue;
+      r.blend+=(r.weight-r.blend)*rate;
+      if(r.weight===0&&r.blend<.01){delete a.reach[side];continue;}
+      const target=resolvePoint(r.target,camera);if(!target)continue;
+      const [upper,lower]=overlay(a,side+'arm',side+'forearm'),hand=a.rig.bones.get(side+'hand');
+      solveTwoBoneIK(upper,lower,hand,target,resolvePoint(r.pole,camera)||armPole(a,side),r.blend);
+    }
+  }
+  function applyGaze(a,dt){
+    const g=a.gaze;if(!g)return;
+    g.blend+=(g.weight-g.blend)*(1-Math.exp(-dt*6));
+    if(g.weight===0&&g.blend<.01){a.gaze=null;return;}
+    const target=resolvePoint(g.target,camera);if(!target)return;
+    g.point=g.point?g.point.lerp(target,1-Math.exp(-dt*10)):target;
+    const rig=a.rig,head=rig.bones.get('head');if(!head)return;
+    const basis=rig.model.getWorldQuaternion(new THREE.Quaternion()),inverse=basis.clone().invert(),up=new THREE.Vector3(0,1,0).applyQuaternion(basis);
+    const turn=(bone,fraction,maxYaw,maxPitch)=>{
+      const local=rig.metrics.forwardLocal.get(bone);if(!local||fraction<=0)return;
+      const eye=worldPosition(head).addScaledVector(up,.07*rig.metrics.height/1.75);
+      const current=()=>local.clone().applyQuaternion(bone.getWorldQuaternion(new THREE.Quaternion()));
+      const d=g.point.clone().sub(eye).normalize().applyQuaternion(inverse),c=current().applyQuaternion(inverse);
+      let yaw=Math.atan2(d.x,d.z)-Math.atan2(c.x,c.z);yaw=Math.atan2(Math.sin(yaw),Math.cos(yaw));
+      const pitch=Math.asin(Math.max(-1,Math.min(1,d.y)))-Math.asin(Math.max(-1,Math.min(1,c.y)));
+      rotateBoneWorld(bone,up,Math.max(-maxYaw,Math.min(maxYaw,yaw*fraction)));
+      const axis=new THREE.Vector3().crossVectors(current(),up);
+      if(axis.lengthSq()>1e-8)rotateBoneWorld(bone,axis,Math.max(-maxPitch,Math.min(maxPitch,pitch*fraction)));
+    };
+    const [neck]=overlay(a,'neck');overlay(a,'head');
+    const neckShare=neck?.4*g.blend:0;
+    if(neck)turn(neck,neckShare,.5,.3);
+    turn(head,neckShare<1?(g.blend-neckShare)/(1-neckShare):0,.8,.45);
+  }
+  function updateBlink(a,t){
+    const face=a.face||{};
+    if(!a.idle?.blink||'eyeBlinkLeft' in face||'eyeBlinkRight' in face){a.blinkValue=0;return;}
+    if(a.blinkNext==null)a.blinkNext=t+1+Math.random()*3;
+    if(t>=a.blinkNext){
+      a.blinkStart=t;
+      // Wide-eyed expressions (surprise, fear) blink less often.
+      const wide=Math.max(a.expressionCurrent?.eyeWideLeft||0,a.expressionCurrent?.eyeWideRight||0)>.4;
+      a.blinkNext=t+(Math.random()<.15?.32:(2.2+Math.random()*3.8)*(wide?1.7:1));
+    }
+    a.blinkValue=blinkCurve(t-a.blinkStart);
+  }
+  function updateExpression(a,dt){
+    const target=expressionChannels(a.emotion,a.intensity),current=a.expressionCurrent||{},next={},rate=dt>0?1-Math.exp(-dt*10):1;
+    for(const channel of new Set([...Object.keys(current),...Object.keys(target)])){
+      const value=(current[channel]||0)+((target[channel]||0)-(current[channel]||0))*rate;
+      if(value>1e-3)next[channel]=value;
+    }
+    a.expressionCurrent=next;
+  }
+  function animate(){if(disposed)return;const t=clock.getElapsedTime(),dt=Math.min(.1,Math.max(0,t-lastTime));lastTime=t;for(const a of actors){
     if(a.move){const k=Math.min(1,(t-a.move.start)/a.move.duration);a.root.position.lerpVectors(a.move.from,a.move.to,k);a.walking=k<1;if(k>=1)a.move=null;}else a.walking=/walk|move/.test(a.gesture);
-    const f=channelsFor(a,t);
+    updateExpression(a,dt);updateBlink(a,t);
+    const f=composeFaceChannels(a);
     if(a.rig){
+      restoreOverlay(a);
+      const posture=activePosture(a);
+      applyPostureTransform(a,posture);
       if(!a.motionActive){
         applyGesturePose(a.rig,a.gesture,a.gestureTime??t);
         if(a.pointTarget&&/aim_target|point|reach/.test(a.gesture)){
@@ -377,11 +809,12 @@ export function createStage(container, options={}) {
           }
         }
       }
-      for(const mesh of a.rig.morphs)for(const [name,index] of Object.entries(mesh.morphTargetDictionary)){
-        const target=morphName(name);
-        if(!/^(brow|cheek|eye|jaw|mouth|nose|tongue|viseme)/.test(target))continue;
-        const entry=Object.entries(f).find(([k])=>morphName(k)===target);
-        mesh.morphTargetInfluences[index]=entry?clamp(entry[1]):a.rig.morphDefaults.get(mesh)[index];
+      a.overlayBase=new Map();a.rig.model.updateMatrixWorld(true);
+      applyIdle(a,t);applyLegs(a,posture);applyReach(a,dt);applyGaze(a,dt);
+      const values=new Map();for(const [name,value] of Object.entries(f)){const n=morphName(name);if(!values.has(n))values.set(n,value);}
+      for(const mesh of a.rig.morphs){
+        const defaults=a.rig.morphDefaults.get(mesh);
+        for(const [target,index] of a.rig.morphKeys.get(mesh))mesh.morphTargetInfluences[index]=values.has(target)?clamp(values.get(target)):defaults[index];
       }
     }else{
       a.root.position.y=.012*Math.sin(t*1.6);a.head.rotation.y=.04*Math.sin(t*.6);
@@ -393,10 +826,9 @@ export function createStage(container, options={}) {
       else if(/wave|beat/.test(a.gesture))a.arms[1].rotation.z=-1.6+.25*Math.sin(t*5);
       a.mouth.scale.y=clamp(f.jawOpen)*.8+.15;
       a.brows.forEach((b,i)=>{const up=(f.browInnerUp||0)+(f[i?'browOuterUpRight':'browOuterUpLeft']||0),down=f[i?'browDownRight':'browDownLeft']||0;b.position.y=.092+up*.025-down*.03;b.rotation.z=(i?1:-1)*down*.3;});
-      a.eyes.forEach((e,i)=>{const wide=f[i?'eyeWideRight':'eyeWideLeft']||0,squint=f[i?'eyeSquintRight':'eyeSquintLeft']||0;e.scale.y=Math.max(.15,1+wide*.8-squint*.8);});
+      a.eyes.forEach((e,i)=>{const wide=f[i?'eyeWideRight':'eyeWideLeft']||0,squint=f[i?'eyeSquintRight':'eyeSquintLeft']||0,closed=f[i?'eyeBlinkRight':'eyeBlinkLeft']||0;e.scale.y=Math.max(.08,(1+wide*.8-squint*.8)*(1-.9*closed));});
     }
   }renderer.render(scene,camera);raf=requestAnimationFrame(animate);}
   animate();
-  return {scene,camera,renderer,avatar,actors,ready,makeAvatar,setCharacter,gesture,pointAt,expression,setSpeech,setSpeechLevel,setFaceChannels,setSkeleton,setMotionFrame,setPosePositions,clearMotion,moveTo,addProp,showAvatar(){avatar.root.visible=true;skeleton.visible=false;},capture(){renderer.render(scene,camera);return renderer.domElement.toDataURL('image/png');},dispose(){disposed=true;cancelAnimationFrame(raf);resize.disconnect();status.remove();selector.remove();if(!previousPosition)container.style.position='';disposeObject(scene);renderer.dispose();renderer.domElement.remove();}};
+  return {scene,camera,renderer,avatar,actors,ready,makeAvatar,setCharacter,gesture,pointAt,expression,setExpression,setSpeech,setSpeechLevel,setVisemes,setFaceChannels,setIdle,blink,reachTo,clearReach,lookAt,gaze:lookAt,sit,lie,stand,setPosture,setFacing,makeOccluder,setSkeleton,setMotionFrame,setPosePositions,clearMotion,moveTo,addProp,showAvatar(){avatar.root.visible=true;skeleton.visible=false;},capture(){renderer.render(scene,camera);return renderer.domElement.toDataURL('image/png');},dispose(){disposed=true;cancelAnimationFrame(raf);resize.disconnect();status.remove();selector.remove();if(!previousPosition)container.style.position='';disposeObject(scene);renderer.dispose();renderer.domElement.remove();}};
 }
-

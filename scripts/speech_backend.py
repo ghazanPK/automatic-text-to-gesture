@@ -1,23 +1,31 @@
 """Lazy local Kokoro TTS / faster-whisper ASR adapters; weights stay user-owned."""
-import io,json,os,tempfile,wave
+import io,json,os,re,tempfile,wave
 from pathlib import Path
 from threading import Lock
 
+VOICE=re.compile(r'^[a-z]{2}_[a-z0-9]+$')
+
 class SpeechBackend:
-    def __init__(self):self.tts=None;self.asr=None;self.lock=Lock()
+    def __init__(self):self.tts=None;self.pipelines={};self.asr=None;self.lock=Lock()
     def status(self):return {'tts':'kokoro' if os.environ.get('KOKORO_MODEL_DIR') else 'browser','asr':bool(os.environ.get('WHISPER_MODEL_DIR')),'models_bundled':False}
-    def synthesize(self,text):
+    def synthesize(self,text,voice='af_heart'):
+        """Kokoro voices are files under voices/; the first letter selects Kokoro's language pipeline (a = US English)."""
         if not isinstance(text,str) or not text.strip() or len(text)>4000:raise ValueError('Supply 1–4000 characters of text.')
+        voice=voice or 'af_heart'
+        if not VOICE.fullmatch(voice):raise ValueError('Kokoro voice names look like af_heart.')
         folder=Path(os.environ.get('KOKORO_MODEL_DIR',''))
-        paths=[folder/'config.json',folder/'kokoro-v1_0.pth',folder/'voices/af_heart.pt']
-        if not os.environ.get('KOKORO_MODEL_DIR') or not all(p.is_file() for p in paths):raise ValueError('Set KOKORO_MODEL_DIR to a local Kokoro folder containing config.json, kokoro-v1_0.pth and voices/af_heart.pt; browser speech remains available.')
+        paths=[folder/'config.json',folder/'kokoro-v1_0.pth',folder/'voices'/f'{voice}.pt']
+        if not os.environ.get('KOKORO_MODEL_DIR') or not all(p.is_file() for p in paths):raise ValueError(f'Set KOKORO_MODEL_DIR to a local Kokoro folder containing config.json, kokoro-v1_0.pth and voices/{voice}.pt; browser speech remains available.')
         with self.lock:
             if self.tts is None:
-                from kokoro import KModel,KPipeline
-                model=KModel(repo_id='hexgrad/Kokoro-82M',config=str(paths[0]),model=str(paths[1])).to('cpu').eval()
-                self.tts=KPipeline(lang_code='a',repo_id='hexgrad/Kokoro-82M',model=model,device='cpu')
+                from kokoro import KModel
+                self.tts=KModel(repo_id='hexgrad/Kokoro-82M',config=str(paths[0]),model=str(paths[1])).to('cpu').eval()
+            lang=voice[0]
+            if lang not in self.pipelines:
+                from kokoro import KPipeline
+                self.pipelines[lang]=KPipeline(lang_code=lang,repo_id='hexgrad/Kokoro-82M',model=self.tts,device='cpu')
             import numpy as np
-            pieces=[audio.detach().cpu().numpy() for _,_,audio in self.tts(text,voice=str(paths[2])) if audio is not None]
+            pieces=[audio.detach().cpu().numpy() for _,_,audio in self.pipelines[lang](text,voice=str(paths[2])) if audio is not None]
             if not pieces:raise ValueError('No audio generated; check the local phonemizer installation.')
             pcm=(np.clip(np.concatenate(pieces),-1,1)*32767).astype('<i2');out=io.BytesIO()
             with wave.open(out,'wb') as wav:wav.setnchannels(1);wav.setsampwidth(2);wav.setframerate(24000);wav.writeframes(pcm.tobytes())

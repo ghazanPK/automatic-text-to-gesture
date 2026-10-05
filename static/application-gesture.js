@@ -1,4 +1,4 @@
-import {MotionSequence} from './gesture-library.js?v=20261005-beat2';
+import {MotionSequence} from './gesture-library.js?v=20261006-paper1';
 
 // A repository-local bridge: the server selects the fixed retrieval mode and
 // supplies only clips prepared in this repository's ignored outputs directory.

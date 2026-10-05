@@ -8,6 +8,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import sys
 import urllib.request
 
 
@@ -28,7 +29,32 @@ def resolve(bank, raw):
     return {'rules': rules, 'provenance': provenance}
 
 
+def extract_with_paper_prompt(bank, endpoint, model):
+    """RIDGE Section 3.1 extraction (verbatim prompt, ridge_gesture.annotate) over each bank clip transcript."""
+    deps = Path(__file__).resolve().parent/'beat_deps'
+    if deps.is_dir() and str(deps) not in sys.path:
+        sys.path.insert(0, str(deps))
+    from ridge_gesture.annotate import PROMPT_SHA256, annotate_record
+    rules = []
+    provenance = {'kind': 'llm_json', 'producer': model, 'prompt': 'RIDGE paper Section 3.1 (verbatim)',
+                  'prompt_sha256': PROMPT_SHA256,
+                  'scope': 'Live extraction from supplied BEAT clip transcripts via ridge_gesture.annotate'}
+    for clip in bank['clips']:
+        words = [{'word': w.get('text', w.get('word')), 'start_frame': w['start_frame'], 'end_frame': w['end_frame']}
+                 for w in clip.get('words') or []]
+        if not words:
+            continue
+        row = annotate_record({'record_id': clip['id'], 'text': clip['text'], 'words': words}, mode='llm',
+                              endpoint=endpoint, model=model, api_key_env='BEAT_LLM_API_KEY')
+        rules += [{'phrase': p['phrase'], 'gesture_id': clip['id'], 'provenance': provenance} for p in row['phrases']]
+    return {'rules': rules, 'provenance': provenance}
+
+
 def extract(bank, endpoint, model):
+    try:
+        return extract_with_paper_prompt(bank, endpoint, model)
+    except ImportError:
+        pass  # ridge_gesture not importable: fall back to the compact JSON prompt below
     transcripts = [{'gesture_id': c['id'], 'text': c['text']} for c in bank['clips']]
     prompt = ('Return JSON {"phrases":[...]} containing at most five salient contiguous spans of 3–10 words '
               'copied exactly from these transcripts. Select meaningful content, not filler. The motion is '

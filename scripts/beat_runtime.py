@@ -1,7 +1,6 @@
 """Standalone local BEAT setup and HTTP boundary for paper/application demos."""
 from __future__ import annotations
 import argparse
-import hashlib
 import json
 from pathlib import Path
 import sys
@@ -12,6 +11,9 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE/'beat_deps'))
 import beat_methods
 
+BUILD_DEFAULTS = {'processed': None, 'raw_root': None, 'speakers': None, 'takes': None,
+                  'max_takes_per_speaker': 1, 'count': 9, 'min_energy': 0.08}
+
 
 def paths(repo_root, mode):
     root = Path(repo_root)
@@ -20,66 +22,130 @@ def paths(repo_root, mode):
     return bank, artifact
 
 
-def setup(repo_root, mode, *, processed=None, epochs=80, strong_rules=None, rebuild=False):
+def _build_module():
+    for folder in (HERE.parent/'beat-demo', HERE/'beat_demo'):  # tools/ checkout, then vendored scripts/
+        if folder.is_dir() and str(folder) not in sys.path:
+            sys.path.insert(0, str(folder))
+    import build_library
+    return build_library
+
+
+def _build_settings(options):
+    return _build_module().settings(options['processed'], options['count'], options['speakers'], options['takes'],
+                                    options['max_takes_per_speaker'], options['raw_root'], options['min_energy'])
+
+
+def _read_settings(bank):
+    try:
+        return json.loads(bank.read_text(encoding='utf-8')).get('build_settings')
+    except (OSError, ValueError):
+        return None
+
+
+def setup(repo_root, mode, *, processed=None, raw_root=None, speakers=None, takes=None, max_takes_per_speaker=1,
+          count=9, min_energy=0.08, epochs=80, strong_rules=None, rebuild=False, seed=7, sbert=None):
+    """Build (or reuse) the local bank, then prepare (or reuse) this mode's adapter.
+
+    The bank is rebuilt when selection flags differ from the cached bank's
+    build settings, or when an unflagged run finds a bank written by an older
+    builder (its stored selection is then rebuilt). The adapter is refit when
+    its cache key (bank hash, epochs, seed, strong rules, Sentence-BERT setting,
+    adapter and paper-package code) changes.
+    """
     bank, artifact = paths(repo_root, mode)
-    if processed or rebuild or not bank.exists():
-        sys.path.insert(0, str(Path(repo_root)/'scripts/beat_demo'))
-        from build_library import build
-        result = build(Path(processed) if processed else None, bank.parent/'source')
-        bank.parent.mkdir(parents=True, exist_ok=True)
-        bank.write_text(json.dumps(result, separators=(',', ':')), encoding='utf-8')
+    options = {'processed': processed, 'raw_root': raw_root, 'speakers': speakers, 'takes': takes,
+               'max_takes_per_speaker': max_takes_per_speaker, 'count': count, 'min_energy': min_energy}
+    flagged = any(options[k] != v for k, v in BUILD_DEFAULTS.items())
+    builder = _build_module()
+    wanted = _build_settings(options)
+    current = _read_settings(bank) if bank.exists() and not rebuild else None
+    if not flagged and current and current.get('builder') != builder.BUILDER:
+        # Same selection, newer builder: reuse the stored flags.
+        options.update({k: current.get(k, v) for k, v in BUILD_DEFAULTS.items()})
+        options['speakers'] = ','.join(options['speakers']) if isinstance(options['speakers'], list) else options['speakers']
+        options['takes'] = ','.join(options['takes']) if isinstance(options['takes'], list) else options['takes']
+        options = {k: (v or None) if k in {'speakers', 'takes', 'processed', 'raw_root'} else v for k, v in options.items()}
+        wanted = _build_settings(options)
+    stale = (flagged and current != wanted) or (
+        not flagged and current is not None and current.get('builder') != builder.BUILDER)
+    if rebuild or not bank.exists() or stale:
+        result = builder.build(Path(options['processed']) if options['processed'] else None, bank.parent/'source',
+                               options['count'], speakers=options['speakers'], takes=options['takes'],
+                               max_takes_per_speaker=options['max_takes_per_speaker'],
+                               raw_root=Path(options['raw_root']) if options['raw_root'] else None,
+                               min_energy=options['min_energy'])
+        result['build_settings'] = wanted
+        builder.save(result, bank)
     if mode == 'wearable':
         return {'bank': str(bank), 'method': 'exact text rules over three seed clips'}
-    explicit_rules = bool(strong_rules)
     if mode == 'ridge' and not strong_rules:
         from beat_semantics import resolve
         annotations = json.loads((HERE/'beat-semantic-annotations.json').read_text(encoding='utf-8'))
         rules = resolve(json.loads(bank.read_text(encoding='utf-8')), annotations)
         strong_rules = bank.parent/'strong-rules.json'
-        strong_rules.write_text(json.dumps(rules, indent=2), encoding='utf-8')
-    cached = json.loads((artifact/'index.json').read_text(encoding='utf-8')) if (artifact/'index.json').exists() else {}
-    if not cached or explicit_rules or rebuild or cached.get('origin_bank_sha256', cached.get('bank_sha256')) != hashlib.sha256(bank.read_bytes()).hexdigest():
-        return beat_methods.prepare(bank, artifact, mode, epochs=epochs, strong_rules_path=strong_rules)
-    return {'artifact_dir': str(artifact), 'cached': True}
+        text = json.dumps(rules, indent=2)
+        if not strong_rules.exists() or strong_rules.read_text(encoding='utf-8') != text:
+            strong_rules.write_text(text, encoding='utf-8')
+    key = beat_methods.cache_key(mode, bank, epochs=epochs, seed=seed, strong_rules_path=strong_rules, sbert=sbert)
+    try:
+        cached = json.loads((artifact/'index.json').read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        cached = {}
+    if rebuild or cached.get('cache_key') != key:
+        return beat_methods.prepare(bank, artifact, mode, epochs=epochs, seed=seed, strong_rules_path=strong_rules,
+                                    sbert=sbert)
+    return {'artifact_dir': str(artifact), 'cached': True, 'cache_key': key}
+
+
+def _ready(repo_root, mode):
+    bank, artifact = paths(repo_root, mode)
+    return bank.exists() and (mode == 'wearable' or (artifact/'index.json').exists())
 
 
 def library(repo_root, mode):
     bank, artifact = paths(repo_root, mode)
-    if not bank.exists() or (mode != 'wearable' and not (artifact/'index.json').exists()):
+    if not _ready(repo_root, mode):
         return {'ready': False, 'message': 'Prepare the local BEAT library with scripts/prepare_beat_demo.py.'}
-    data = json.loads(bank.read_text(encoding='utf-8'))
-    info = json.loads((artifact/'index.json').read_text(encoding='utf-8')) if mode != 'wearable' else {}
-    if mode == 'multilingual':
+    data, _ = beat_methods._read_json(bank)
+    info, _ = beat_methods._read_json(artifact/'index.json') if mode != 'wearable' else ({}, None)
+    playback = data
+    if info.get('bank_path'):
+        # Pose modes play extracted units and RIDGE adds phrase-timed spans: list the playback bank.
         refined = Path(info['bank_path'])
-        if not refined.is_absolute():
-            refined = artifact/refined
-        data = json.loads(refined.read_text(encoding='utf-8'))
-    available = info.get('playback_ids', data['base_ids'])
-    clips = [{'id': c['id'], 'text': c['text'], 'duration': len(c['positions'])/data['fps'],
-              'source': c['source']} for c in data['clips'] if c['id'] in available]
-    examples = [c['text'] for c in (clips if mode in {'wild','multilingual'} else clips[:3])]
-    if mode == 'ridge' and info.get('strong_rules'):
-        examples = [info['strong_rules'][0]['phrase'], clips[4]['text'], clips[-1]['text']]
-    if mode == 'automatic':
-        mined = [r['text'] for r in info.get('rules', []) if r.get('route') == 'weak_pose_rule']
-        examples += mined[:1]
-    if len(examples) >= 3:
-        examples.append('. '.join(examples[:3]))
+        playback, _ = beat_methods._read_json(refined if refined.is_absolute() else artifact/refined)
+    available = set(info.get('playback_ids', data['base_ids']))
+    clips = [{'id': c['id'], 'text': c.get('text', ''), 'duration': len(c['positions'])/playback['fps'],
+              'source': c.get('source', {})} for c in playback['clips'] if c['id'] in available]
+    if mode == 'wearable':
+        examples = [c['text'] for c in clips[:3]]
+    else:
+        examples = list(info.get('suggested_queries') or [c['text'] for c in clips[:3] if c['text']])
     if mode == 'multilingual':
         translations = Path(repo_root)/'examples/beat-translations.json'
         if translations.exists():
-            examples = list(json.loads(translations.read_text(encoding='utf-8')))[:3] + examples
+            korean = list(json.loads(translations.read_text(encoding='utf-8')))
+            examples = korean[:1] + examples + korean[1:3]
     metrics = {'seed_pairs': 3, 'bank_clips': len(clips), 'association_windows': len(data['associations']),
                'rules': len(info.get('rules', info.get('strong_rules', []))), 'training_loss': info.get('training_loss')}
-    return {'ready': True, 'mode': mode, 'clips': clips, 'suggested_queries': examples,
-            'metrics': metrics, 'algorithm': info.get('algorithm', 'Exact string rules over seed gestures')}
+    metrics.update({k: v for k, v in info.get('metrics', {}).items() if k != 'learned_rule_usage'})
+    if mode == 'wearable':
+        metrics['rules'] = 3
+    result = {'ready': True, 'mode': mode, 'clips': clips, 'suggested_queries': examples,
+              'metrics': metrics, 'algorithm': info.get('algorithm', 'Exact string rules over seed gestures'),
+              'provenance': data.get('provenance')}
+    if mode != 'wearable':
+        result['text_encoder'] = beat_methods.encoder_label(info)
+    if mode == 'automatic':
+        result['default_threshold'] = info.get('default_threshold')
+        result['threshold_rule'] = info.get('threshold_rule')
+    return result
 
 
 def query_application(repo_root, mode, text, params=None):
     bank_path, artifact = paths(repo_root, mode)
-    if not library(repo_root, mode)['ready']:
+    if not _ready(repo_root, mode):
         raise ValueError('Local BEAT library is not prepared. Run python scripts/prepare_beat_demo.py.')
-    params = {k: (v[0] if isinstance(v, list) else v) for k, v in (params or {}).items()}
+    params = {k: (v[0] if isinstance(v, list) and v else v) for k, v in (params or {}).items()}
     if not isinstance(text, str) or not text.strip() or len(text) > 2000:
         raise ValueError('Supply 1–2000 characters of query text')
     if mode == 'wearable':
@@ -98,17 +164,29 @@ def query_application(repo_root, mode, text, params=None):
             if found:
                 slots.append({'gesture_id': found['id'], 'text': phrase, 'frames': found['positions'],
                               'route': 'exact_seed_rule', 'source': found['source']})
+        base = {'ready': True, 'fps': bank['fps'], 'joint_order': bank['joint_names'],
+                'axisSigns': bank.get('axisSigns', [1, 1, 1]), 'algorithm': 'Exact seed phrase matching'}
         if not slots:
             # The early method really has no generic fallback: do not manufacture a match.
-            return {'ready': True, 'fps': bank['fps'], 'joint_order': bank['joint_names'], 'axisSigns': bank['axisSigns'],
-                    'slots': [], 'trace': {'routes': [], 'unmatched': text}, 'algorithm': 'Exact seed phrase matching'}
-        return {'ready': True, 'fps': bank['fps'], 'joint_order': bank['joint_names'], 'axisSigns': bank['axisSigns'],
-                'slots': slots, 'trace': {'routes': ['exact_seed_rule']*len(slots)}, 'algorithm': 'Exact seed phrase matching'}
+            return {**base, 'slots': [], 'no_match': True,
+                    'trace': {'routes': ['idle_no_match'], 'unmatched': text}}
+        return {**base, 'slots': slots, 'no_match': False, 'trace': {'routes': ['exact_seed_rule']*len(slots)}}
     if mode == 'multilingual':
-        params['source_language'] = params.get('source_language', params.get('language', 'en'))
+        # source_language (or language) selects the route; a caller-supplied
+        # english_text is an explicit translation for this one line.
+        language = params.get('source_language') or params.get('language') or 'en'
+        params['source_language'] = str(language)
         translations = Path(repo_root)/'examples/beat-translations.json'
-        if translations.exists():
-            params.setdefault('translation_map', json.loads(translations.read_text(encoding='utf-8')))
+        table = dict(json.loads(translations.read_text(encoding='utf-8'))) if translations.exists() else {}
+        if isinstance(params.get('translation_map'), dict):
+            table.update(params['translation_map'])
+        if isinstance(params.get('english_text'), str) and params['english_text'].strip():
+            table[text] = params['english_text'].strip()
+        params['translation_map'] = table
+    else:
+        # Translation fields are accepted and ignored by modes that do not translate.
+        for key in ('source_language', 'language', 'english_text', 'translation_map', 'mode'):
+            params.pop(key, None)
     result = beat_methods.query(text, params, mode, artifact)
     result['ready'] = True
     if mode == 'multilingual':
@@ -126,17 +204,22 @@ def serve_beat(handler, repo_root, mode):
         else:
             params = parse_qs(parsed.query)
             if handler.command == 'POST':
-                size = int(handler.headers.get('Content-Length', '0'))
+                size = int(handler.headers.get('Content-Length', '0') or 0)
                 if not 0 < size <= 32_000:
                     raise ValueError('Text query must be under 32 KB')
-                params.update(json.loads(handler.rfile.read(size)))
+                body = json.loads(handler.rfile.read(size))
+                if not isinstance(body, dict):
+                    raise ValueError('POST body must be a JSON object such as {"text": "..."}')
+                params.update(body)
             text = params.pop('text', '')
             if isinstance(text, list):
-                text = text[0]
+                text = text[0] if text else ''
             result = query_application(repo_root, mode, text, params)
         status = 200
-    except (ValueError, FileNotFoundError) as error:
-        result, status = {'error': str(error)}, 400
+    except (ValueError, FileNotFoundError, KeyError, TypeError) as error:
+        result, status = {'error': str(error) or type(error).__name__}, 400
+    except Exception as error:  # keep the demo server alive and report the failure
+        result, status = {'error': f'{type(error).__name__}: {error}'}, 500
     body = json.dumps(result, ensure_ascii=False).encode('utf-8')
     handler.send_response(status)
     handler.send_header('Content-Type', 'application/json; charset=utf-8')
@@ -150,14 +233,27 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--repo', type=Path, default=HERE.parent)
     parser.add_argument('--mode', choices=['wearable', 'automatic', 'wild', 'multilingual', 'ridge'], required=True)
-    parser.add_argument('--processed', type=Path)
+    parser.add_argument('--processed', type=Path, help='Processed OmniMo BEAT root (<speaker>/meta.json)')
+    parser.add_argument('--raw-root', type=Path, help='Local raw beat_english_v0.2.1 folder')
+    parser.add_argument('--speakers', help='Comma list of speaker ids/names for the bank (processed or raw-root)')
+    parser.add_argument('--takes', help='Comma list of take ids (public download route needs explicit ids)')
+    parser.add_argument('--max-takes-per-speaker', type=int, default=1)
+    parser.add_argument('--count', type=int, default=9, help='Bank clips (3-12)')
+    parser.add_argument('--min-energy', type=float, default=0.08, help='Bank motion-energy floor (m/s)')
     parser.add_argument('--epochs', type=int, default=80)
     parser.add_argument('--strong-rules', type=Path)
+    parser.add_argument('--sbert', help='Local Sentence-BERT folder for text matching (default: $BEAT_SBERT_MODEL; '
+                                        'otherwise a labelled TF-IDF fallback). Nothing is downloaded.')
     parser.add_argument('--query')
     parser.add_argument('--rebuild', action='store_true', help='Regenerate the local bank and refit this demo adapter')
     args = parser.parse_args()
-    result = query_application(args.repo, args.mode, args.query) if args.query else setup(args.repo, args.mode, processed=args.processed,
-                                                                                       epochs=args.epochs, strong_rules=args.strong_rules, rebuild=args.rebuild)
+    if args.query:
+        result = query_application(args.repo, args.mode, args.query)
+    else:
+        result = setup(args.repo, args.mode, processed=args.processed, raw_root=args.raw_root, speakers=args.speakers,
+                       takes=args.takes, max_takes_per_speaker=args.max_takes_per_speaker, count=args.count,
+                       min_energy=args.min_energy, epochs=args.epochs, strong_rules=args.strong_rules,
+                       rebuild=args.rebuild, sbert=args.sbert)
     print(json.dumps(result, ensure_ascii=False))
 
 
