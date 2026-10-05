@@ -9,14 +9,22 @@ import numpy as np
 from export_playback import make_playback
 from beat_runtime import serve_beat, library as beat_library, query_application
 from speech_backend import SpeechBackend, speech_route
+import paper_method_common as pm
 
 MODE = "automatic"
 
 
-def serve(a):
+def make_server(a):
+    """Build the HTTP server; ``serve`` runs it (tests use port 0)."""
     root = Path(__file__).resolve().parents[1] / "static"
     speech = SpeechBackend()
-    if a.example:
+    prepared = None
+    if a.prepared:
+        # BEAT paper-method artifacts from scripts/prepare_paper_method.py
+        from paper_method_demo import PreparedDemo
+        prepared = PreparedDemo(a.prepared, a)
+        query = prepared.query
+    elif a.example:
         from example_demo import query as example_query
         def query(text, params):
             if beat_library(root.parent, MODE)['ready']:
@@ -55,7 +63,7 @@ def serve(a):
         library_npz = np.load(a.data_dir / "units.npz")
         library = {str(k): v for k, v in zip(library_npz["ids"], library_npz["motion3d"])}
         groups = {int(k): [str(x) for x in d["ids"][d["labels"] == k]] for k in np.unique(d["labels"])}
-        encoder = SentenceTransformer(a.sbert)
+        encoder = SentenceTransformer(a.sbert or "all-MiniLM-L6-v2")
         def query(text, params):
             seed = int(params.get("seed", [str(a.seed)])[0])
             sequence = retrieve(text, rules, lambda x: encoder.encode(x, normalize_embeddings=True), groups, seed)
@@ -71,7 +79,7 @@ def serve(a):
         library_npz = np.load(a.data_dir / "units.npz")
         library = {str(k): v for k, v in zip(library_npz["ids"], library_npz["motion3d"])}
         groups = {int(k): [str(x) for x in d["ids"][d["labels"] == k]] for k in np.unique(d["labels"])}
-        encoder = SentenceTransformer(a.sbert)
+        encoder = SentenceTransformer(a.sbert or "all-MiniLM-L6-v2")
         translations = json.loads(Path(a.translations).read_text(encoding="utf-8")) if a.translations else {}
         def query(text, params):
             language = params.get("language", ["en"])[0]
@@ -92,7 +100,7 @@ def serve(a):
         ck = torch.load(a.checkpoint, map_location="cpu", weights_only=True)
         model = TextMotionModel(ck["text_dim"], ck["motion_dim"])
         model.load_state_dict(ck["state"]); model.eval()
-        encoder = SentenceTransformer(a.sbert)
+        encoder = SentenceTransformer(a.sbert or "all-MiniLM-L6-v2")
         library_npz = np.load(a.data_dir / "train_pairs.npz")
         library = {str(k): v for k, v in zip(library_npz["ids"], library_npz["motion"])}
         latent = ck["motion_latents"].cpu().numpy().astype("float32")
@@ -117,6 +125,7 @@ def serve(a):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, directory=str(root), **kwargs)
         def do_GET(self):
+            if prepared is not None and pm.handle(self, prepared): return
             if serve_beat(self, root.parent, MODE): return
             parsed = urlparse(self.path)
             if parsed.path == "/api/query":
@@ -136,12 +145,17 @@ def serve(a):
                 return
             return super().do_GET()
         def do_POST(self):
+            if prepared is not None and pm.handle(self, prepared): return
             if serve_beat(self, root.parent, MODE): return
             if speech_route(self, speech):
                 return
             self.send_error(404)
-    server = ThreadingHTTPServer((a.host, a.port), Handler)
-    print(f"Demo: http://{a.host}:{a.port}/")
+    return ThreadingHTTPServer((a.host, a.port), Handler)
+
+
+def serve(a):
+    server = make_server(a)
+    print(f"Demo: http://{a.host}:{server.server_port}/")
     server.serve_forever()
 
 
@@ -149,22 +163,23 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--data-dir", type=Path)
     p.add_argument("--example", action="store_true", help="run authored motion with illustrative vectors; no weights")
+    p.add_argument("--prepared", type=Path, help="folder written by scripts/prepare_paper_method.py (paper method on public BEAT)")
     p.add_argument("--rules", type=Path)
     p.add_argument("--clusters", type=Path)
     p.add_argument("--checkpoint", type=Path)
     p.add_argument("--glove", type=Path)
-    p.add_argument("--sbert", default="all-MiniLM-L6-v2")
+    p.add_argument("--sbert", help="Sentence-BERT name or directory (default all-MiniLM-L6-v2; prepared mode: the model recorded by prepare_paper_method.py)")
     p.add_argument("--translations", type=Path)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--data-label", default="User-prepared motion")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8765)
     a = p.parse_args()
-    if not a.example and a.data_dir is None:
+    if not a.example and not a.prepared and a.data_dir is None:
         p.error("--data-dir is required for prepared-data mode")
-    if not a.example and MODE in ("wild", "multilingual") and (not a.rules or not a.clusters):
+    if not a.example and not a.prepared and MODE in ("wild", "multilingual") and (not a.rules or not a.clusters):
         p.error("--rules and --clusters are required")
-    if not a.example and MODE == "ridge" and (not a.rules or not a.checkpoint):
+    if not a.example and not a.prepared and MODE == "ridge" and (not a.rules or not a.checkpoint):
         p.error("--rules and --checkpoint are required")
     serve(a)
 

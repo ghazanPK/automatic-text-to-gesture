@@ -92,6 +92,67 @@ python scripts/demo_server.py --example
 
 The pipeline centers upper-body 2D poses at the neck, slides projected gesture-bank clips over a timed video pose stream, accepts frame-cosine matches at the paper's `0.92` threshold, and records up-to-five-word phrases. The frame-cosine mean covers only the gesture's real frames, so a short gesture centre-padded into a longer window can still match. Mining loops over any number of video clips (Algorithm 1's outer loop) and writes a threshold-calibration report. Runtime retrieval sums GloVe word vectors for each five-word chunk and selects the most similar stored phrase. The paper's three maps are available: Manual (NVBG-style keyword rules), Auto (mined rules) and Hybrid (manual keyword match first, GloVe otherwise). The browser's local BEAT index is a compact simulation of weak association over a fixed bank; [Wild Pose Matching](https://github.com/ghazanPK/wild-pose-matching) later replaces this mean pose match with learned matching.
 
+### Reproduce with BEAT
+
+`scripts/prepare_paper_method.py` runs this repository's full pipeline on public [BEAT](https://pantomatrix.github.io/BEAT/) motion, then serves the result in the browser viewer. Disjoint speakers take the paper's two roles:
+
+| Role | Default speakers | Used for |
+|---|---|---|
+| `library` | 3 | 3 s neck-centred windows projected frontally to 2D. They form the gesture bank, standing in for the paper's predefined animation library. |
+| `video` | 3 | Whole takes with their word timings stand in for public video. Each take is projected through a camera at yaw 20° and pitch 5°, then corrupted like OpenPose tracks: noise, ±1-frame jitter and 5% joint dropout. `attg mine` slides the bank over every clip (Algorithm 1). The last video take is held out of mining as a probe. |
+
+Roles are assigned per speaker with a fixed `--seed`. `--role library=1,2 --role video=rest` overrides them.
+
+**1. GloVe.** Retrieval sums GloVe vectors (Algorithm 2), so the hook needs a GloVe text file and never downloads one.
+1. Download `glove.6B.zip` from the [GloVe project](https://nlp.stanford.edu/projects/glove/) (about 820 MB).
+2. Extract `glove.6B.300d.txt` into `data/glove/`.
+3. Optionally, cut it to the 20,000 most frequent words plus every word spoken in your BEAT copy:
+
+```bash
+python scripts/build_glove_subset.py --glove data/glove/glove.6B.300d.txt --vocab-from /path/to/processed/beat \
+  --output data/glove/glove.6B.300d.subset.txt
+```
+
+The hook uses `data/glove/glove.6B.300d.subset.txt`, then `data/glove/glove.6B.300d.txt`. `--glove FILE` or the `GLOVE_PATH` environment variable selects another file.
+
+**2a. Processed OmniMo collection.** The collection is laid out as `<root>/<speaker>/{meta.json,motion.npz}`:
+
+```bash
+python scripts/prepare_paper_method.py --processed /path/to/processed/beat
+python scripts/demo_server.py --prepared outputs/paper-method/<key> --port 8080
+```
+
+The last line of standard output is JSON whose `server_args` give the exact prepared folder.
+
+**2b. Raw BEAT from Hugging Face.** Download BVH and TextGrid pairs from the official dataset [`H-Liu1997/BEAT`](https://huggingface.co/datasets/H-Liu1997/BEAT) into `data/beat/beat_english_v0.2.1/<speaker>/`. Each BVH is about 20 MB:
+
+```bash
+base=https://huggingface.co/datasets/H-Liu1997/BEAT/resolve/main/beat_english_v0.2.1/beat_english_v0.2.1
+for take in 1_wayne_0_1_1 1_wayne_0_2_2 2_scott_0_1_1 2_scott_0_2_2 3_solomon_0_3_3 3_solomon_0_4_4 \
+            4_lawrence_0_2_2 4_lawrence_0_3_3 5_stewart_0_1_1 5_stewart_0_2_2 6_carla_0_2_2 6_carla_0_3_3; do
+  spk=${take%%_*}; mkdir -p data/beat/beat_english_v0.2.1/$spk
+  for ext in bvh TextGrid; do curl -fL -o data/beat/beat_english_v0.2.1/$spk/$take.$ext $base/$spk/$take.$ext; done
+done
+python scripts/build_glove_subset.py --glove data/glove/glove.6B.300d.txt --vocab-from data/beat/beat_english_v0.2.1
+python scripts/prepare_paper_method.py --beat-root data/beat/beat_english_v0.2.1
+```
+
+**Launcher.** `python scripts/start_demo.py` runs this hook after the shared BEAT demo preparation.
+- **Source.** It looks in `--processed` or `--beat-root`, then `BEAT_PROCESSED_ROOT` or `BEAT_RAW_ROOT`, then `data/beat/processed` or `data/beat/beat_english_v0.2.1`.
+- **Missing input.** Without a source or GloVe, it prints the next step and the default demo starts unchanged.
+- **Cache.** Results are cached in ignored `outputs/paper-method/<settings hash>/`. A repeat launch with the same settings returns at once; `--force` rebuilds.
+
+**Threshold.** On projected BEAT poses, the paper's 0.92 sits near the median window–gesture frame cosine. Most of the bank would then pass most windows, so the random pick would make rules arbitrary. `--preset demo` (the default) therefore runs `attg calibrate` and mines at the 95th percentile of the window–gesture scores, rounded to 0.01; `--threshold-percentile` changes it. `--preset paper`, or an explicit `--threshold`, mines at that value. The viewer's slider starts at the prepared threshold. Moving it re-mines the prepared video clips before retrieval.
+
+**Demo scale.** The default uses speakers 1–6 with up to three takes each, and takes seconds on a CPU. One local run on the processed collection mined 131 rules over 61 of 234 bank gestures at threshold 0.95, from 177 windows in eight video takes. For more data, use `--speakers all --max-takes-per-speaker 0`.
+
+**Viewer.**
+- `/api/beat-library` lists the bank clips, the calibration metrics and the default threshold. Its suggested queries include mined rule phrases and held-out probes, which are phrases from the held-out video take.
+- `/api/beat-query` returns each five-word chunk's bank frames with route `mined_pose_rule`, its GloVe similarity and the matched rule phrase. A chunk without GloVe vocabulary, or below an optional `min_similarity`, returns `idle_no_match`.
+- The stored held-out metric asks how often GloVe retrieval of a held-out phrase picks the bank gesture that its pose matches best. Chance is one over the number of distinct rule gestures.
+
+**Limits.** Projected BEAT motion stands in for the paper's 106 hours of public video and its separately animated library; it is not the paper's data. At demo scale the mined map covers few words, and text–gesture agreement on held-out phrases is only modestly above chance.
+
 ### Setup and public data
 
 ```bash
