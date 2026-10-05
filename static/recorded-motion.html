@@ -37,7 +37,7 @@
   </section>
   <section class="panel" aria-label="Playback">
     <div id="stage" class="stage"></div>
-    <div class="toolbar"><button id="play" disabled>Play</button><button id="restart" disabled>Restart</button><span id="time">0.00 / 0.00 s</span></div>
+    <div class="toolbar"><button id="play" disabled>Play</button><button id="restart" disabled>Restart</button><span id="time">0.00 / 0.00 s</span><label>View <select id="camera-view" aria-label="Camera view"><option value="body">Full body</option><option value="hands">Both hands</option><option value="left">Left hand</option><option value="right">Right hand</option></select></label></div>
     <input id="scrub" type="range" min="0" max="0" step="1" value="0" disabled aria-label="Motion frame">
     <div class="transcript"><small>Aligned words</small><span id="words">Load a motion clip to inspect its transcript timing.</span></div>
     <p class="note">Character motion is retargeted by the shared avatar renderer. Source and avatar skeletons differ, so this view is an inspection aid rather than a faithful reconstruction of the original performer.</p>
@@ -53,6 +53,18 @@
   let motion=null,face=null,audioUrl=null,frameIndex=0,playing=false,startClock=0,startTime=0,raf=0;
   const status=message=>{$('status').textContent=message;};
   const duration=()=>motion ? motion.frames.length / Number(motion.fps) : 0;
+  function focusCamera(){
+    const view=$('camera-view').value;
+    if(view==='body'){stage.camera.position.set(0,1.3,3.3);stage.camera.lookAt(0,.9,0);return;}
+    const bones=stage.avatar.rig?.bones;if(!bones)return;
+    const left=bones.get('lefthand'),right=bones.get('righthand');if(!left||!right)return;
+    const a=left.getWorldPosition(left.position.clone()),b=right.getWorldPosition(right.position.clone());
+    const distance=view==='hands'?Math.max(.8,a.distanceTo(b)*1.8):.4;
+    const center=view==='left'?a:view==='right'?b:a.add(b).multiplyScalar(.5);
+    stage.camera.position.set(center.x,center.y+.08,center.z+distance);
+    stage.camera.lookAt(center);
+  }
+  $('camera-view').onchange=focusCamera;
   function faceChannels(index){
     if(!face)return null;
     const names=face.names||face.lufaNames;
@@ -77,6 +89,7 @@
       stage.setSkeleton(frame.positions,edges);
     }
     stage.setFaceChannels(faceChannels(frameIndex));
+    focusCamera();
     $('scrub').value=String(frameIndex);
     $('time').textContent=`${(frameIndex/motion.fps).toFixed(2)} / ${duration().toFixed(2)} s`;
     const words=motion.annotations?.words||[];

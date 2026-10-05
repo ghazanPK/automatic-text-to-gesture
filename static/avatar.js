@@ -70,6 +70,55 @@ export function aimBoneToward(bone,child,target){
   const localDelta=parentWorld.clone().invert().multiply(worldDelta).multiply(parentWorld);
   bone.quaternion.premultiply(localDelta);bone.updateMatrixWorld(true);return true;
 }
+export function palmFrame(forward,across){
+  const y=forward.clone().normalize();
+  const x=across.clone().addScaledVector(y,-across.dot(y));
+  if(forward.lengthSq()<1e-10||x.lengthSq()<1e-10)return null;
+  x.normalize();const z=new THREE.Vector3().crossVectors(x,y).normalize();
+  return new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(x,y,z));
+}
+export function fingerBend(incoming,outgoing,axis,limit=1.45){
+  const n=axis.clone().normalize();
+  const a=incoming.clone().addScaledVector(n,-incoming.dot(n));
+  const b=outgoing.clone().addScaledVector(n,-outgoing.dot(n));
+  if(n.lengthSq()<1e-10||a.lengthSq()<1e-10||b.lengthSq()<1e-10)return 0;
+  a.normalize();b.normalize();
+  return Math.max(-limit,Math.min(limit,Math.atan2(n.dot(new THREE.Vector3().crossVectors(a,b)),a.dot(b))));
+}
+function fitFinger(bone,name,rig,positions,transform){
+  const match=name.match(/^(index|middle|ring|pinky)0([123])([lr])$/);
+  if(!match)return false;
+  const [,digit,segment,side]=match,hand=side==='l'?'lefthand':'righthand';
+  const wrist=positions.get(hand),middle=positions.get(`middle01${side}`),index=positions.get(`index01${side}`),little=positions.get(`pinky01${side}`);
+  if(!wrist||!middle||!index||!little)return false;
+  const axis=transform(index.clone().sub(little)).normalize();
+  // Source phalange angles transfer curl, while the avatar's bind pose keeps
+  // its own finger spacing. A distal joint without a tip follows the PIP curl.
+  const k=Math.min(Number(segment),2),base=positions.get(`${digit}0${k}${side}`),next=positions.get(`${digit}0${k+1}${side}`);
+  const previous=k===1?wrist:positions.get(`${digit}01${side}`);
+  if(!base||!next||!previous)return false;
+  const incoming=k===1?middle.clone().sub(wrist):base.clone().sub(previous);
+  const angle=fingerBend(transform(incoming),transform(next.clone().sub(base)),axis,k===1?.85:1.45)*(segment==='3'?.65:1);
+  const handBone=rig.bones.get(hand),targetMiddle=rig.bones.get(`middle01${side}`),targetIndex=rig.bones.get(`index01${side}`),targetLittle=rig.bones.get(`pinky01${side}`);
+  if(!handBone||!targetMiddle||!targetIndex||!targetLittle)return false;
+  const targetFrame=palmFrame(targetMiddle.getWorldPosition(new THREE.Vector3()).sub(handBone.getWorldPosition(new THREE.Vector3())),targetIndex.getWorldPosition(new THREE.Vector3()).sub(targetLittle.getWorldPosition(new THREE.Vector3())));
+  if(!targetFrame)return false;
+  const hinge=new THREE.Vector3(1,0,0).applyQuaternion(targetFrame).applyQuaternion(bone.parent.getWorldQuaternion(new THREE.Quaternion()).invert());
+  bone.quaternion.copy(rig.bind.get(bone)).premultiply(new THREE.Quaternion().setFromAxisAngle(hinge,angle));
+  bone.updateMatrixWorld(true);return true;
+}
+function fitPalm(bone,bones,positions,transform){
+  const side=key(bone.name)==='lefthand'?'l':'r';
+  const middle=`middle01${side}`,index=`index01${side}`,little=`pinky01${side}`;
+  if(![middle,index,little,key(bone.name)].every(k=>positions.has(k))||![middle,index,little].every(k=>bones.has(k)))return false;
+  const origin=bone.getWorldPosition(new THREE.Vector3());
+  const current=palmFrame(bones.get(middle).getWorldPosition(new THREE.Vector3()).sub(origin),bones.get(index).getWorldPosition(new THREE.Vector3()).sub(bones.get(little).getWorldPosition(new THREE.Vector3())));
+  const sourceOrigin=positions.get(key(bone.name));
+  const desired=palmFrame(transform(positions.get(middle).clone().sub(sourceOrigin)),transform(positions.get(index).clone().sub(positions.get(little))));
+  if(!current||!desired)return false;
+  const delta=desired.multiply(current.invert()),parent=bone.parent.getWorldQuaternion(new THREE.Quaternion());
+  bone.quaternion.premultiply(parent.clone().invert().multiply(delta).multiply(parent));bone.updateMatrixWorld(true);return true;
+}
 export function bindRelativeWorldRotation(sourceWorld,sourceRestWorld,targetRestWorld,parentWorld,basis=new THREE.Quaternion()){
   const delta=sourceWorld.clone().multiply(sourceRestWorld.clone().invert());
   const worldDelta=basis.clone().multiply(delta).multiply(basis.clone().invert());
@@ -224,11 +273,24 @@ export function createStage(container, options={}) {
       // direction. Keep the neck/head bind orientation instead of fitting it
       // from a single landmark; full quaternion clips retain head motion.
       if(name==='neck'||name==='head')continue;
+      if((name==='lefthand'||name==='righthand')&&fitPalm(bone,actor.rig.bones,positions,transform)){applied++;continue;}
+      if(fitFinger(bone,name,actor.rig,positions,transform)){applied++;continue;}
       const from=positions.get(name);if(!from)continue;
       const child=poseDirectionChild(bone,positions);
       if(!child)continue;
       const target=transform(positions.get(key(child.name)).clone().sub(from));
-      if(aimBoneToward(bone,child,target))applied++;
+      if(aimBoneToward(bone,child,target)){
+        const finger=name.match(/^(thumb|index|middle|ring|pinky)0([123])[lr]$/);
+        if(finger){
+          // Different finger proportions and noisy capture can produce extreme
+          // local rotations. Retain articulated motion within a bounded range.
+          const limit=(finger[1]==='thumb'?[1.1,1.4,1.0]:[1.4,1.9,1.4])[Number(finger[2])-1];
+          const bind=actor.rig.bind.get(bone),angle=bind.angleTo(bone.quaternion);
+          if(angle>limit)bone.quaternion.copy(bind.clone().slerp(bone.quaternion,limit/angle));
+          bone.updateMatrixWorld(true);
+        }
+        applied++;
+      }
     }
     actor.motionActive=applied>0;
     return applied>0;
