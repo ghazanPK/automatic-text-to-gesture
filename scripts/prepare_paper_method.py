@@ -181,6 +181,11 @@ def prepare(args):
     source, kind = pm.find_source(args.processed, args.beat_root, demo_sample=True)
     if source is None:
         return pm.not_ready("no local BEAT source found", pm.SOURCE_STEPS)
+    if not args.role and source == (pm.ROOT / pm.DEMO_SAMPLE).resolve():
+        # Four public takes from speakers 1, 2, 4: speaker 1 is the bank, the other three takes are video
+        # (two mined, one held-out probe), instead of a two-speaker bank and a single mined take.
+        args.role = ["library=1", "video=rest"]
+        pm.progress("using the downloaded public demo sample (speaker 1 = library, speakers 2 and 4 = video)")
     encoder_kind, encoder_ref, why, steps = find_encoder(args)
     if encoder_ref is None:
         return pm.not_ready(why, steps)

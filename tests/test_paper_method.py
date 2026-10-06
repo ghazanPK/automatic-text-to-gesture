@@ -99,7 +99,10 @@ def test_fresh_clone_falls_back_to_the_downloaded_demo_sample(tmp_path, monkeypa
         path.rename(sample / path.name)
     code, result = run(["--sbert", str(prepared["sbert"]), "--output-root", str(tmp_path / "out"), "--speakers", SPEAKERS])
     assert code == 0 and result["ready"], result
-    assert manifest_of(result)["source"]["kind"] == "raw"
+    manifest = manifest_of(result)
+    assert manifest["source"]["kind"] == "raw"
+    roles = manifest["roles"]["roles"]
+    assert roles["library"] == ["1"] and set(roles["video"]) == {"2", "3", "4"}  # demo-sample role split
 
 
 def test_missing_source_or_encoder_is_not_ready(tmp_path, monkeypatch, prepared):
