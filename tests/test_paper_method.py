@@ -87,6 +87,21 @@ def test_raw_bvh_textgrid_route_with_optional_glove(tmp_path, prepared):
     assert "GloVe" in manifest["metrics"]["heldout"]
 
 
+def test_fresh_clone_falls_back_to_the_downloaded_demo_sample(tmp_path, monkeypatch, prepared):
+    """A fresh clone has no dataset: the raw takes fetched by prepare_beat_demo.py feed the paper method."""
+    for name in (pm.ENV_PROCESSED, pm.ENV_RAW):
+        monkeypatch.delenv(name, raising=False)
+    flat = beat_fixture.make_raw(tmp_path / "staging", speakers=SPEAKERS.split(","), takes=2)
+    sample = tmp_path / "outputs" / "beat-library" / "source"
+    monkeypatch.setattr(pm, "DEMO_SAMPLE", sample)  # absolute: ROOT / sample == sample
+    sample.mkdir(parents=True)
+    for path in flat.rglob("*.*"):  # build_library keeps the downloads in one flat folder
+        path.rename(sample / path.name)
+    code, result = run(["--sbert", str(prepared["sbert"]), "--output-root", str(tmp_path / "out"), "--speakers", SPEAKERS])
+    assert code == 0 and result["ready"], result
+    assert manifest_of(result)["source"]["kind"] == "raw"
+
+
 def test_missing_source_or_encoder_is_not_ready(tmp_path, monkeypatch, prepared):
     for name in (pm.ENV_PROCESSED, pm.ENV_RAW, pm.ENV_GLOVE, *pm.ENV_SBERT_ORDER):
         monkeypatch.delenv(name, raising=False)

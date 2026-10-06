@@ -118,8 +118,15 @@ def add_source_args(parser, speakers, max_takes, roles_help):
     parser.add_argument("--force", action="store_true", help="rebuild even when a cached result matches")
 
 
-def find_source(processed=None, raw=None):
-    """Return (path, kind) for the first available BEAT source, or (None, None)."""
+DEMO_SAMPLE = Path("outputs/beat-library/source")  # raw BVH/TextGrid takes fetched by prepare_beat_demo.py (under ROOT)
+
+
+def find_source(processed=None, raw=None, demo_sample=False):
+    """Return (path, kind) for the first available BEAT source, or (None, None).
+
+    With ``demo_sample`` the public takes that ``scripts/prepare_beat_demo.py`` downloaded (four takes from
+    three speakers) are the last resort, so a fresh clone can run the paper method at a very small scale.
+    """
     choices = []
     if raw:
         choices.append((Path(raw), "raw"))
@@ -132,6 +139,8 @@ def find_source(processed=None, raw=None):
             choices.append((Path(os.environ[ENV_RAW]), "raw"))
         choices += [(ROOT / "data/beat/processed", "processed"), (ROOT / "data/beat/beat_english_v0.2.1", "raw"),
                     (ROOT / "data/beat/raw", "raw")]
+        if demo_sample:
+            choices.append((ROOT / DEMO_SAMPLE, "raw"))
     for path, kind in choices:
         if path.is_dir():
             try:

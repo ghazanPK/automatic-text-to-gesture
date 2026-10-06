@@ -177,7 +177,8 @@ def heldout_probe(clips, bank_path, rules, encoder, threshold, seed):
 
 
 def prepare(args):
-    source, kind = pm.find_source(args.processed, args.beat_root)
+    # Last resort: the public BEAT takes the launcher's demo preparation downloaded (fresh clone, no dataset).
+    source, kind = pm.find_source(args.processed, args.beat_root, demo_sample=True)
     if source is None:
         return pm.not_ready("no local BEAT source found", pm.SOURCE_STEPS)
     encoder_kind, encoder_ref, why, steps = find_encoder(args)

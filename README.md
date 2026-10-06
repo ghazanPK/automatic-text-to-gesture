@@ -144,7 +144,7 @@ python scripts/prepare_paper_method.py --beat-root data/beat/beat_english_v0.2.1
 ```
 
 **Launcher.** `python scripts/start_demo.py` runs this hook after the shared BEAT demo preparation.
-- **Source.** It looks in `--processed` or `--beat-root`, then `BEAT_PROCESSED_ROOT` or `BEAT_RAW_ROOT`, then `data/beat/processed` or `data/beat/beat_english_v0.2.1`.
+- **Source.** It looks in `--processed` or `--beat-root`, then `BEAT_PROCESSED_ROOT` or `BEAT_RAW_ROOT`, then `data/beat/processed` or `data/beat/beat_english_v0.2.1`, and finally the public takes that the shared demo preparation downloaded into `outputs/beat-library/source` (four takes from speakers 1, 2 and 4). On a fresh clone that last source makes the paper method ready at a very small scale; configure a larger source for meaningful rules.
 - **Missing input.** Without a source or text encoder, it prints the next step and the default demo starts unchanged.
 - **Cache.** Results are cached in ignored `outputs/paper-method/<settings hash>/`. A repeat launch with the same settings returns at once; `--force` rebuilds.
 
