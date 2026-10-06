@@ -148,7 +148,7 @@ The RIDGE contract writes these files:
 
 | File | Contents |
 |---|---|
-| `train_pairs.npz` | `motion [N,L,J*3]`, `ids`, `texts`, `speakers` (train role), plus `text_embeddings` **only** when `--sbert <local path or model name>` is given. Nothing is downloaded implicitly. |
+| `train_pairs.npz` | `motion [N,L,J*3]`, `ids`, `texts`, `speakers` (train role), plus `text_embeddings` **only** when `--sbert <local path or model name>` is given. The export downloads nothing itself. |
 | `heldout_pairs.npz` | The same keys, for the heldout role. |
 | `speaker_motion.npy` | Continuous motion (library role). |
 | `transcripts.jsonl` | One record per library take: `{record_id, speaker, text, words}`. |
@@ -235,8 +235,9 @@ preparation, response formatting and the idle floor.
 
 All four modes share these rules.
 
-- **Text encoders.** Local models are picked up automatically. Nothing is
-  downloaded.
+- **Text encoders.** Local models are picked up automatically. The adapters
+  download nothing; `scripts/start_demo.py` fetches the default model first (see
+  [Default model download](#default-model-download)).
   - **Sentence-BERT** comes from `prepare_beat_demo.py --sbert`,
     `BEAT_SBERT_MODEL`, `SBERT_MODEL` (the variable the paper-method scripts
     read), or `<repo>/models/all-MiniLM-L6-v2`.
@@ -245,13 +246,20 @@ All four modes share these rules.
   - **Model names only.** Responses and `index.json` name the model (for
     example `sentence-bert (all-MiniLM-L6-v2)`), never its absolute path. The
     folder is resolved again from the same settings at query time.
-  - **Automatic mode** sums word vectors as Algorithm 2 does. It uses GloVe from
-    `BEAT_GLOVE_PATH`, `GLOVE_PATH` or `<repo>/models/glove.*.txt`. Without
-    GloVe but with a local Sentence-BERT, each content word is encoded on its own
-    and used as its word vector (labelled). Only words in the model's word-piece
-    vocabulary get a vector, so gibberish and untranslated Hangul stay
-    out-of-vocabulary. Without either model it uses labelled bag-of-words
-    vectors.
+  - **Automatic mode** keeps Algorithm 2 (five-word chunks, argmax cosine over
+    the rule phrases). By default it uses all-MiniLM-L6-v2 phrase vectors through
+    the package's `SentenceEncoder`, the owner-approved substitution for the
+    paper's summed GloVe vectors. A chunk needs a content word in the model's
+    word-piece vocabulary, so gibberish and untranslated Hangul stay
+    out-of-vocabulary and idle. GloVe stays optional: `BEAT_GLOVE_PATH`,
+    `GLOVE_PATH` or `<repo>/models/glove.*.txt` selects it (word vectors summed
+    per phrase). Without either model it uses labelled bag-of-words vectors.
+  - **Unavailable model at query time.** An index prepared with Sentence-BERT
+    stores rule embeddings from that model. If the server later runs without it
+    (no setting and no `models/all-MiniLM-L6-v2`, or no sentence-transformers),
+    queries do not fail: the rule texts are re-encoded with a TF-IDF fallback, the
+    TF-IDF idle floor applies, RIDGE's trained fallback idles, and
+    `text_encoder` plus `trace.encoder_note` name the cause and the fix.
 - **Idle semantics.** Each mode follows its paper.
   - **Automatic (Algorithm 2).** The best rule is played whenever a chunk shares
     vocabulary with the rule map. There is no similarity floor. Only true OOV
@@ -426,6 +434,10 @@ are needed for meaningful numbers.
 `start_demo.py` contains a managed block, installed idempotently by the
 integration script. The block runs in this order:
 
+0. In repositories whose demo uses Sentence-BERT (modes `automatic`, `wild`,
+   `multilingual`, `ridge`) it runs `scripts/beat_demo/fetch_models.py` (see
+   [Default model download](#default-model-download)). The result never stops
+   the launcher.
 1. It runs `scripts/prepare_beat_demo.py`, unless `--skip-beat` is given. A
    failure prints a clear message and the demo continues with the existing cache
    or the authored starter.
@@ -453,3 +465,25 @@ The launcher handles the result as follows:
 
 Keep the hook cheap when its outputs are already current: cache by an input hash,
 as `beat_runtime.setup` does.
+
+## Default model download
+
+`fetch_models.py` (vendored as `scripts/beat_demo/fetch_models.py`; standard
+library only) makes the small default text model available on first run:
+
+- **Model.** `sentence-transformers/all-MiniLM-L6-v2` at a pinned revision, about
+  92 MB (Apache-2.0), into the repository's ignored `models/all-MiniLM-L6-v2`.
+  The weights are checked against their published size and SHA-256. The files
+  go to a partial folder first, so an interrupted download leaves nothing behind.
+- **Reuse.** An existing folder with `modules.json` and weights is reused.
+- **Opt-out.** `start_demo.py --offline`, `PAPERREACH_OFFLINE=1` or
+  `HF_HUB_OFFLINE=1` skips the download. `BEAT_SBERT_MODEL` or `SBERT_MODEL`
+  (your own model) also skips it. `HF_ENDPOINT` selects a mirror.
+- **Failure.** A failed download prints the reason, the fallback (labelled
+  TF-IDF or bag-of-words text matching) and the retry command. The demo starts
+  anyway.
+- **Scope.** Only this model is automatic. Larger optional models (bert-base for
+  Context-Aware `--train-starter`, Kokoro, Whisper, LLMs, the paper-named mpnet
+  models in ASAP, GloVe) stay opt-in and are documented in each README.
+- **Never committed.** `models/` is in every integrated repository's
+  `.gitignore`.

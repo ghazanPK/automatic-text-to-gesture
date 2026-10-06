@@ -190,7 +190,9 @@ def library(repo_root, mode):
     if not _ready(repo_root, mode):
         return {'ready': False, 'message': 'Prepare the local BEAT library with scripts/prepare_beat_demo.py.'}
     data, _ = beat_methods._read_json(bank)
-    info, _ = beat_methods._read_json(artifact/'index.json') if mode != 'wearable' else ({}, None)
+    info, index_sha = beat_methods._read_json(artifact/'index.json') if mode != 'wearable' else ({}, None)
+    if mode != 'wearable':  # a Sentence-BERT index whose model is unavailable now reports its TF-IDF degradation
+        info = beat_methods._usable_encoders(info, index_sha)
     playback = data
     if info.get('bank_path'):
         # Pose modes play extracted units and RIDGE adds phrase-timed spans: list the playback bank.
@@ -330,7 +332,8 @@ def main():
     parser.add_argument('--epochs', type=int, default=80)
     parser.add_argument('--strong-rules', type=Path)
     parser.add_argument('--sbert', help='Local Sentence-BERT folder for text matching (default: $BEAT_SBERT_MODEL; '
-                                        'otherwise a labelled TF-IDF fallback). Nothing is downloaded.')
+                                        'otherwise models/all-MiniLM-L6-v2, which start_demo.py fetches on first run; '
+                                        'otherwise a labelled TF-IDF fallback). This step downloads no model.')
     parser.add_argument('--query')
     parser.add_argument('--rebuild', action='store_true', help='Regenerate the local bank and refit this demo adapter')
     args = parser.parse_args()

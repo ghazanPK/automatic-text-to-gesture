@@ -1,1 +1,3 @@
 numpy>=1.26
+# Sentence-BERT text matching; start_demo.py downloads all-MiniLM-L6-v2 (about 92 MB) into ignored models/
+sentence-transformers>=2.2

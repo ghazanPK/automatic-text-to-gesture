@@ -52,7 +52,7 @@ import numpy as np
 
 MODES = {"automatic", "wild", "multilingual", "ridge"}
 WORDS = re.compile(r"[\w']+", re.UNICODE)
-CODE_VERSION = "2026-10-06.f1"
+CODE_VERSION = "2026-10-06.m1"
 IDLE_ID = "idle"
 MIN_SIMILARITY = 0.2           # RIDGE index default (its rule threshold and fallback are separate)
 SBERT_MIN_SIMILARITY = 0.35    # legacy value, kept for callers that pass it explicitly
@@ -235,7 +235,8 @@ def _models_dir():
 def sbert_setting(explicit=None):
     """Local Sentence-BERT folder: the argument, ``BEAT_SBERT_MODEL``, ``SBERT_MODEL`` or ``<repo>/models/<name>``.
 
-    None means the labelled TF-IDF fallback. Nothing is downloaded.
+    None means the labelled TF-IDF fallback. This lookup downloads nothing; scripts/start_demo.py fetches
+    all-MiniLM-L6-v2 into ``<repo>/models`` on first run (scripts/beat_demo/fetch_models.py).
     """
     if explicit:
         return str(explicit)
@@ -609,8 +610,9 @@ def _prepare_automatic(bank, base, seed, **_):
 
 
 _GLOVE: dict = {}
-_WORD_VECTORS: dict = {}
-BOW_LABEL = "bag-of-words fallback (summed one-hot IDF vectors; set BEAT_GLOVE_PATH for GloVe)"
+_PHRASE_ENCODERS: dict = {}
+BOW_LABEL = ("bag-of-words fallback (summed one-hot IDF vectors; all-MiniLM-L6-v2 is fetched by start_demo.py, "
+             "or set BEAT_SBERT_MODEL)")
 
 
 def _automatic_vector_label():
@@ -618,17 +620,19 @@ def _automatic_vector_label():
     if glove:
         return f"glove ({model_name(glove)})"
     if sbert:
-        return (f"sentence-bert word vectors ({model_name(sbert)}; each word encoded alone and summed as in "
-                "Algorithm 2; set BEAT_GLOVE_PATH for the paper's GloVe)")
+        return (f"sentence-bert ({model_name(sbert)}; phrase vectors in place of the paper's summed GloVe; "
+                "set BEAT_GLOVE_PATH for GloVe)")
     return BOW_LABEL
 
 
 def _automatic_vectors(rules, text):
-    """Word vectors for Algorithm 2's summed-vector phrase match.
+    """Vectors for Algorithm 2's phrase match (five-word chunks, argmax cosine over the rule phrases).
 
-    GloVe when a local file is configured (the paper's vectors); otherwise, with a
-    local Sentence-BERT, each word is encoded on its own and used as its word
-    vector; otherwise one-hot IDF vectors over the rule content words.
+    GloVe word vectors, summed per phrase, when a local GloVe file is configured
+    (the paper's optional vectors); otherwise all-MiniLM-L6-v2 phrase vectors
+    through the package's ``SentenceEncoder`` (the default substitution; content
+    words outside the model's vocabulary leave a chunk idle); otherwise one-hot
+    IDF vectors over the rule content words.
     """
     from automatic_text_to_gesture.core import TOKEN, load_glove
     required = {w for r in rules for w in TOKEN.findall(r.phrase.lower())} | set(TOKEN.findall(text.lower()))
@@ -644,15 +648,16 @@ def _automatic_vectors(rules, text):
     sbert = sbert_setting()
     if sbert:
         try:
-            encoder = SbertText(sbert)
             with _MODEL_LOCK:
-                cache = _WORD_VECTORS.setdefault(sbert, {})
-                # Only content words in the model's word-piece vocabulary get a vector, so true OOV text
-                # (gibberish, untranslated non-Latin script) still idles as in Algorithm 2.
-                missing = sorted(w for w in required - cache.keys() if w not in STOPWORDS and encoder.known(w))
-                if missing:
-                    cache.update(zip(missing, encoder.encode(missing)))
-                return {w: cache[w] for w in required if w in cache}, _automatic_vector_label()
+                encoder = _PHRASE_ENCODERS.get(sbert)
+                if encoder is None:
+                    from automatic_text_to_gesture.core import SentenceEncoder
+                    # Only chunks with a content word in the model's word-piece vocabulary get a vector, so true
+                    # OOV text (gibberish, untranslated non-Latin script) still idles as in Algorithm 2.
+                    encoder = SentenceEncoder(SbertText(sbert).model(), name=model_name(sbert), stopwords=STOPWORDS)
+                    encoder.vocabulary()
+                    _PHRASE_ENCODERS[sbert] = encoder
+            return encoder, _automatic_vector_label()
         except Exception:  # optional dependency or unreadable folder: fall back to the labelled bag of words
             pass
     encoder = TfidfText.fit([r.phrase for r in rules])
@@ -1351,12 +1356,15 @@ def _query_ridge(text, params, info, artifact, floor):
     threshold = _float_param(params, "strong_rule_threshold", .65)
     model = _ridge_model(artifact)
     rule_encoder = text_encoder(info["text_encoder"])
-    fallback_encoder = text_encoder(info["fallback_encoder"])
+    unavailable = info.get("fallback_unavailable")
+    fallback_encoder = rule_encoder if unavailable else text_encoder(info["fallback_encoder"])
     latents = np.asarray(info["fallback_latents"], np.float32)
     ids = info["fallback_ids"]
     memo = {}
 
     def encode_fallback(chunk):
+        if unavailable:  # the trained fallback needs the prepare-time text embeddings: no score, idles below
+            return np.zeros(latents.shape[1], np.float32)
         if chunk not in memo:
             with torch.no_grad():
                 z = encode_text(model, torch.from_numpy(fallback_encoder.encode([chunk]))).numpy()[0]
@@ -1385,6 +1393,9 @@ def _query_ridge(text, params, info, artifact, floor):
             continue
         coverage, known = fallback_encoder.coverage(row["text"])
         detail = {"similarity": round(row["similarity"], 5), "vocabulary_coverage": round(coverage, 3)}
+        if unavailable:
+            slots.append((row["text"], None, {"kind": "idle", "reason": unavailable}, detail, 0.0))
+            continue
         if not known or coverage <= 0:
             slots.append((row["text"], None, {"kind": "idle", "reason": "no in-vocabulary content word"}, detail, 0.0))
             continue
@@ -1523,6 +1534,62 @@ def _float_param(params, name, default, low=0.0, high=1.0):
     return value
 
 
+_DEGRADED: dict = {}
+
+
+def _sbert_available(spec):
+    """True when the Sentence-BERT model an index was prepared with can be loaded in this process now."""
+    path = spec.get("path") or sbert_setting()
+    if not path:
+        return False
+    try:
+        SbertText(path, spec.get("model")).model()
+        return True
+    except Exception:  # missing folder or sentence-transformers: the caller degrades instead of failing
+        return False
+
+
+def _usable_encoders(info, index_sha):
+    """Index whose Sentence-BERT encoders can run now, or a labelled TF-IDF degradation of it.
+
+    An index prepared with Sentence-BERT stores rule embeddings from that model. When the model is not
+    configured or not loadable when the server runs (e.g. BEAT_SBERT_MODEL unset and no
+    ``models/all-MiniLM-L6-v2``), the rule texts are re-encoded with a TF-IDF fallback fitted on them, the
+    TF-IDF idle floor applies, and RIDGE's trained fallback (which needs the original text embeddings) idles
+    with a note. Queries keep working instead of failing; the label names the cause and the fix.
+    """
+    specs = [info.get(k) or {} for k in ("text_encoder", "fallback_encoder")]
+    if not any(s.get("kind") == "sbert" for s in specs):
+        return info
+    model = next(s.get("model") for s in specs if s.get("kind") == "sbert") or SBERT_NAME
+    if all(_sbert_available(s) for s in specs if s.get("kind") == "sbert"):
+        return info
+    key = (index_sha, sbert_setting())
+    if key in _DEGRADED:
+        return _DEGRADED[key]
+    note = (f"Sentence-BERT {model} used at prepare time is unavailable now; TF-IDF over the rule texts. Fix: python "
+            f"scripts/beat_demo/fetch_models.py or set BEAT_SBERT_MODEL, then python scripts/prepare_beat_demo.py")
+    out = dict(info, encoder_degraded=note)
+    if info["mode"] in {"wild", "multilingual"}:
+        texts = [str(r["text"]) for r in info["rules"]]
+        encoder = TfidfText.fit(texts, note=note)
+        out["rules"] = [dict(r, text_embedding=e.tolist()) for r, e in zip(info["rules"], encoder.encode(texts))]
+        out["text_encoder"] = encoder.to_dict()
+        if info.get("min_similarity") == POSE_SBERT_FLOOR:
+            out["min_similarity"] = POSE_TFIDF_FLOOR
+    elif info["mode"] == "ridge":
+        rules = info.get("strong_rules") or []
+        encoder = TfidfText.fit([str(r["phrase"]) for r in rules] or ["idle"], note=note)
+        out["strong_rules"] = [dict(r, embedding=encoder.encode([r["phrase"]])[0].tolist()) for r in rules]
+        out["text_encoder"] = encoder.to_dict()
+        if (info.get("fallback_encoder") or {}).get("kind") == "sbert":
+            out["fallback_unavailable"] = note
+    if len(_DEGRADED) > 8:
+        _DEGRADED.clear()
+    _DEGRADED[key] = out
+    return out
+
+
 def query(text, params, mode, artifact_dir):
     """Return playable source frames and a transparent retrieval trace."""
     if mode not in MODES:
@@ -1531,9 +1598,10 @@ def query(text, params, mode, artifact_dir):
         raise ValueError("Query text is empty")
     params = params or {}
     artifact = Path(artifact_dir)
-    info, _ = _read_json(artifact / "index.json")
+    info, index_sha = _read_json(artifact / "index.json")
     if info["mode"] != mode:
         raise ValueError(f"Prepared artifact is {info['mode']}, not {mode}")
+    info = _usable_encoders(info, index_sha)
     source = Path(info["bank_path"])
     if not source.is_absolute():
         source = artifact / source
@@ -1591,7 +1659,8 @@ def query(text, params, mode, artifact_dir):
             "text_encoder": label,
             "trace": {"input": text, "retrieval_text": retrieval_text, "routes": routes,
                       "translation": translation, "unit_refinement": info.get("units"),
-                      "text_encoder": label, **trace_extra},
+                      "text_encoder": label, **({"encoder_note": info["encoder_degraded"]}
+                                                if info.get("encoder_degraded") else {}), **trace_extra},
             "algorithm": info["algorithm"], "data_label": info["data_label"],
             "metrics": {"rule_count": len(rules), "bank_count": info["bank_count"], "seed_pairs": info["seed_pairs"],
                         "extended_rules": max(0, len(info.get("rules", [])) - info["seed_pairs"]),

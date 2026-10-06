@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import re
+import threading
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -245,6 +247,95 @@ def mine_clips(clips: Iterable[Clip], bank: Mapping[str, np.ndarray], threshold:
 # --------------------------------------------------------------------------- retrieval
 
 TOKEN = re.compile(r"[\w']+")
+SBERT_NAME = "all-MiniLM-L6-v2"
+SBERT_ENV = ("BEAT_SBERT_MODEL", "SBERT_MODEL")
+
+
+def find_sentence_model(explicit: str | Path | None = None, roots: Iterable[str | Path] = (".",)) -> str | None:
+    """Sentence-BERT model: ``explicit``, ``BEAT_SBERT_MODEL``, ``SBERT_MODEL``, then ``<root>/models/all-MiniLM-L6-v2``.
+
+    The same lookup order as the repository's demo scripts. Returns None when nothing is configured; a
+    model *name* (not a folder) is returned as given and sentence-transformers resolves it.
+    """
+    if explicit:
+        return str(explicit)
+    for name in SBERT_ENV:
+        if os.environ.get(name):
+            return os.environ[name]
+    for root in roots:
+        folder = Path(root) / "models" / SBERT_NAME
+        if folder.is_dir():
+            return str(folder.resolve())
+    return None
+
+
+class SentenceEncoder:
+    """Sentence-BERT phrase vectors for Algorithm 2: the all-MiniLM-L6-v2 substitution for summed GloVe.
+
+    Each five-word chunk and each mined rule phrase is encoded as a whole (L2-normalised), and the
+    chunk takes the rule with the highest cosine, as in Algorithm 2. A text gets a vector only when one
+    of its tokens is a whole word of the model's tokenizer vocabulary (``stopwords`` excluded), so a
+    chunk of gibberish or an unsupported script stays out of vocabulary and idles, as a chunk without
+    GloVe words does. ``model`` is a loaded sentence-transformers model or a folder/name to load.
+    """
+
+    kind = "sentence-bert"
+
+    def __init__(self, model, name: str | None = None, stopwords: Iterable[str] = (), device: str = "cpu", cache_size: int = 50000):
+        if isinstance(model, (str, Path)):
+            from sentence_transformers import SentenceTransformer
+            name = name or Path(str(model)).name
+            model = SentenceTransformer(str(model), device=device)
+        self.model = model
+        self.name = name or "sentence-transformer"
+        self.stopwords = frozenset(w.lower() for w in stopwords)
+        self.cache_size = int(cache_size)
+        self._vocab: frozenset | None = None
+        self._cache: dict[str, np.ndarray] = {}
+        self._lock = threading.Lock()
+
+    @property
+    def label(self) -> str:
+        return f"sentence-bert ({self.name})"
+
+    def vocabulary(self) -> frozenset:
+        if self._vocab is None:
+            tokenizer = getattr(self.model, "tokenizer", None)
+            getter = getattr(tokenizer, "get_vocab", None)
+            vocab = getter() if callable(getter) else getattr(tokenizer, "vocab", None)
+            self._vocab = frozenset(vocab or ())
+        return self._vocab
+
+    def in_vocabulary(self, text: str) -> bool:
+        """True when a token (or a part around an apostrophe) is a whole vocabulary word, not a stopword."""
+        vocab = self.vocabulary()
+        for token in TOKEN.findall(str(text).lower()):
+            parts = [p for p in token.split("'") if len(p) > 1 or p.isdigit()] or [token]
+            if any((p in vocab if vocab else True) and p not in self.stopwords for p in parts):
+                return True
+        return False
+
+    def encode(self, texts: Sequence[str]) -> np.ndarray:
+        texts = list(texts)
+        with self._lock:  # one forward pass at a time; demo servers share the encoder between threads
+            missing = [t for t in dict.fromkeys(texts) if t not in self._cache]
+            if missing and len(self._cache) + len(missing) > self.cache_size:
+                self._cache.clear()
+                missing = list(dict.fromkeys(texts))
+            if missing:
+                rows = np.asarray(self.model.encode(missing, normalize_embeddings=True), np.float32).reshape(len(missing), -1)
+                self._cache.update(zip(missing, rows))
+            if not texts:
+                return np.zeros((0, 0), np.float32)
+            return np.stack([self._cache[t] for t in texts])
+
+    def phrase_matrix(self, texts: Sequence[str]) -> np.ndarray:
+        """Encoded texts; texts without vocabulary get a zero row (they never match)."""
+        texts = list(texts)
+        matrix = self.encode(texts)
+        known = np.array([self.in_vocabulary(t) for t in texts], bool)
+        matrix[~known] = 0.0
+        return matrix
 
 
 def phrase_vector(text: str, vectors: Mapping[str, np.ndarray], dim: int | None = None) -> np.ndarray:
@@ -363,8 +454,11 @@ def retrieve(text: str, rules: list[Rule], vectors: Mapping[str, np.ndarray], au
              oov: str = "idle", idle_id: str | None = "idle", min_similarity: float | None = None) -> list[dict]:
     """Algorithm 2 with the paper's three maps.
 
-    ``auto``: summed-GloVe cosine against mined rule phrases. ``manual``: keyword containment only;
-    unmatched chunks go idle. ``hybrid``: manual match first (higher priority), GloVe otherwise.
+    ``vectors`` is either a word-vector mapping (the paper's GloVe; a phrase vector is the sum of its
+    word vectors) or a phrase encoder such as ``SentenceEncoder`` (all-MiniLM-L6-v2 phrase vectors, the
+    default substitution). Chunking, the argmax cosine and the audio-divided timing are the same.
+    ``auto``: cosine against mined rule phrases. ``manual``: keyword containment only;
+    unmatched chunks go idle. ``hybrid``: manual match first (higher priority), vectors otherwise.
     Rules whose ``source`` is ``manual`` are treated as single-pattern manual entries.
     A chunk with no vocabulary overlap (or below ``min_similarity``) goes idle, is skipped, or raises (``oov``).
     """
@@ -387,9 +481,14 @@ def retrieve(text: str, rules: list[Rule], vectors: Mapping[str, np.ndarray], au
     segments = chunks(text, chunk_words)
     slot = audio_seconds / len(segments) if audio_seconds is not None and segments else None
     matrix = None
+    encoder = None if isinstance(vectors, Mapping) else vectors
+    vocabulary_name = "GloVe" if encoder is None else "Sentence-BERT"
     if mode != "manual":
-        dim = len(next(iter(vectors.values()))) if vectors else 300
-        matrix = np.stack([phrase_vector(r.phrase, vectors, dim) for r in rules])
+        if encoder is not None:
+            matrix = encoder.phrase_matrix([r.phrase for r in rules])
+        else:
+            dim = len(next(iter(vectors.values()))) if vectors else 300
+            matrix = np.stack([phrase_vector(r.phrase, vectors, dim) for r in rules])
         rule_norms = np.linalg.norm(matrix, axis=1)
     result = []
     for index, segment in enumerate(segments):
@@ -402,7 +501,10 @@ def retrieve(text: str, rules: list[Rule], vectors: Mapping[str, np.ndarray], au
             continue
         reason = "no manual keyword"
         if matrix is not None:
-            query = phrase_vector(segment, vectors, matrix.shape[1])  # computed once per chunk
+            if encoder is not None:  # computed once per chunk
+                query = encoder.phrase_matrix([segment])[0]
+            else:
+                query = phrase_vector(segment, vectors, matrix.shape[1])
             qn = float(np.linalg.norm(query))
             scores = np.divide(matrix @ query, rule_norms * qn, out=np.full(len(rules), -1.0, np.float32), where=rule_norms * qn > 0)
             best = int(np.argmax(scores))
@@ -410,7 +512,7 @@ def retrieve(text: str, rules: list[Rule], vectors: Mapping[str, np.ndarray], au
                 entry.update(gesture_id=rules[best].gesture_id, similarity=float(scores[best]), map="auto", rule_phrase=rules[best].phrase)
                 result.append(entry)
                 continue
-            reason = "no GloVe vocabulary overlap" if qn == 0 or scores[best] <= -1 else f"best similarity {scores[best]:.3f} below {min_similarity}"
+            reason = f"no {vocabulary_name} vocabulary overlap" if qn == 0 or scores[best] <= -1 else f"best similarity {scores[best]:.3f} below {min_similarity}"
         if oov == "error":
             raise ValueError(f"{reason} for text chunk: {segment}")
         if oov == "idle":
