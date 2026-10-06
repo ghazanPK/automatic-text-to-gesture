@@ -143,3 +143,46 @@ def test_cli_multi_video_manifest_and_report(tmp_path, capsys):
     assert report["threshold"] == .92 and "window pass rate" in capsys.readouterr().err
     cli_main(["config"])
     assert json.loads(capsys.readouterr().out)["chunk_words"] == 5
+
+
+class _StubTokenizer:
+    def get_vocab(self):
+        return {w: i for i, w in enumerate(["move", "forward", "ahead", "stand", "together", "never", "again", "the", "and"])}
+
+
+class _StubModel:
+    """Sentence-transformers stand-in: a phrase vector is the normalised count of three topic axes."""
+    tokenizer = _StubTokenizer()
+    axes = {"move": 0, "forward": 0, "ahead": 0, "stand": 1, "together": 1, "never": 2, "again": 2}
+
+    def __init__(self):
+        self.calls = 0
+
+    def encode(self, texts, normalize_embeddings=True):
+        self.calls += 1
+        out = np.zeros((len(texts), 3), np.float32)
+        for i, text in enumerate(texts):
+            for word in text.lower().split():
+                if word in self.axes:
+                    out[i, self.axes[word]] += 1
+            out[i] /= max(np.linalg.norm(out[i]), 1e-8)
+        return out
+
+
+def test_sentence_encoder_keeps_algorithm_2_structure():
+    """MiniLM substitution: phrase vectors, 5-word chunks, argmax cosine, audio-divided timing, OOV idle."""
+    from automatic_text_to_gesture.core import SentenceEncoder
+    model = _StubModel()
+    encoder = SentenceEncoder(model, name="stub", stopwords={"the", "and"})
+    rules = [Rule("move forward", "g_forward", 1.0, 0, 8), Rule("stand together", "g_together", 1.0, 0, 8),
+             Rule("never again", "g_never", 1.0, 0, 8)]
+    text = "the never and again stop qqq zzz yyy xxx www go ahead move and the stand"
+    out = retrieve(text, rules, encoder, audio_seconds=6.0, chunk_words=5)
+    assert [len(e["text"].split()) for e in out] == [5, 5, 5]
+    assert [e["gesture_id"] for e in out] == ["g_never", "idle", "g_forward"]
+    assert [e["start_seconds"] for e in out] == [0.0, 2.0, 4.0] and all(e["duration_seconds"] == 2.0 for e in out)
+    assert out[1]["map"] == "idle" and out[1]["reason"] == "no Sentence-BERT vocabulary overlap"
+    assert encoder.in_vocabulary("never") and not encoder.in_vocabulary("the and") and not encoder.in_vocabulary("qqq")
+    calls = model.calls
+    retrieve("move forward now please go", rules, encoder)
+    assert model.calls == calls + 1  # rule phrases are cached; only the new chunk is encoded

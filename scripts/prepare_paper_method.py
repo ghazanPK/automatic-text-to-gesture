@@ -12,10 +12,15 @@ Disjoint BEAT speakers take the paper's two roles:
   in for public video. ``attg mine`` slides the bank over every clip
   (Algorithm 1) and records timed <=5-word phrases; ``attg calibrate`` reports
   the score distribution. The last video take is held out of mining and probes
-  whether GloVe retrieval of its phrases picks the gesture its pose matches.
+  whether text retrieval of its phrases picks the gesture its pose matches.
 
-Runtime retrieval sums GloVe vectors (Algorithm 2), so a GloVe file is needed;
-``scripts/build_glove_subset.py`` makes a small one from glove.6B.300d.txt.
+Runtime retrieval (Algorithm 2) keeps the paper's structure: five-word chunks,
+the most similar mined phrase by cosine, audio-divided timing. Phrase and chunk
+vectors come from Sentence-BERT all-MiniLM-L6-v2 (``models/all-MiniLM-L6-v2``,
+fetched by ``scripts/start_demo.py`` on first run), a documented substitution for
+the paper's summed GloVe vectors, which need an 820 MB download. GloVe stays an
+optional alternative: ``--glove FILE`` or ``--encoder glove``
+(``scripts/build_glove_subset.py`` makes a small file from glove.6B.300d.txt).
 Results are cached under ``outputs/paper-method/<settings hash>/``.
 """
 from __future__ import annotations
@@ -49,7 +54,11 @@ GLOVE_STEPS = (
 def parse(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     pm.add_source_args(p, DEFAULT_SPEAKERS, DEFAULT_TAKES, "library, video")
-    p.add_argument("--glove", type=Path, help=f"GloVe text vectors (default {GLOVE_CANDIDATES[0]} or {GLOVE_CANDIDATES[1]})")
+    p.add_argument("--encoder", choices=("sbert", "glove"), default="sbert",
+                   help="phrase vectors: sbert (default, all-MiniLM-L6-v2) or glove (the paper's summed GloVe)")
+    p.add_argument("--sbert", help=f"Sentence-BERT directory (default models/{pm.SBERT_NAME}; env BEAT_SBERT_MODEL or {pm.ENV_SBERT})")
+    p.add_argument("--glove", type=Path, help=f"optional GloVe text vectors; implies --encoder glove "
+                                              f"(default {GLOVE_CANDIDATES[0]} or {GLOVE_CANDIDATES[1]}; env {pm.ENV_GLOVE})")
     p.add_argument("--preset", choices=("demo", "paper"), default="demo",
                    help="demo: threshold from --threshold-percentile, rounded to 0.01; paper: the paper's 0.92")
     p.add_argument("--threshold", type=float, help="explicit frame-cosine threshold (overrides the preset)")
@@ -59,8 +68,11 @@ def parse(argv=None):
     p.add_argument("--yaw", type=float, default=20.0); p.add_argument("--pitch", type=float, default=5.0)
     p.add_argument("--noise", type=float, default=0.02); p.add_argument("--jitter", type=int, default=1)
     p.add_argument("--dropout", type=float, default=0.05)
-    p.add_argument("--min-similarity", type=float, help="optional GloVe similarity floor; below it a chunk idles")
-    return p.parse_args(argv)
+    p.add_argument("--min-similarity", type=float, help="optional text similarity floor; below it a chunk idles")
+    args = p.parse_args(argv)
+    if args.glove:
+        args.encoder = "glove"
+    return args
 
 
 def find_glove(value=None):
@@ -71,16 +83,49 @@ def find_glove(value=None):
     for candidate in GLOVE_CANDIDATES:
         if (pm.ROOT / candidate).is_file():
             return (pm.ROOT / candidate).resolve(), None
-    return None, "GloVe vectors were not found (the paper's summed-GloVe retrieval needs them)"
+    return None, "GloVe vectors were not found (--encoder glove needs a GloVe text file)"
 
 
-def _settings(args, source, kind, descriptors, glove):
-    stat = glove.stat()
+def find_encoder(args):
+    """(kind, model path/name or GloVe file, why-not, next steps) for the selected phrase vectors."""
+    if args.encoder == "glove":
+        glove, why = find_glove(args.glove)
+        return "glove", glove, why, GLOVE_STEPS
+    sbert, why = pm.find_sbert(args.sbert)
+    return "sbert", sbert, why, (pm.SBERT_STEP, "or use the paper's GloVe instead: --encoder glove (see --glove)")
+
+
+def encoder_spec(kind, ref):
+    """Manifest record: model or file name only (the runtime resolves the local folder again)."""
+    if kind == "glove":
+        return {"kind": "glove", "file": pm.portable(ref)}
+    return {"kind": "sentence-bert", "model": Path(str(ref)).name or str(ref)}
+
+
+def encoder_fingerprint(kind, ref):
+    path = Path(str(ref))
+    if kind == "glove":
+        stat = path.stat()
+        return ["glove", str(path), stat.st_size, int(stat.st_mtime)]
+    weights = next((path / n for n in ("model.safetensors", "pytorch_model.bin") if (path / n).is_file()), None)
+    return ["sbert", path.name or str(ref), weights.stat().st_size if weights else None]
+
+
+def text_vectors(kind, ref, rules=(), texts=()):
+    """Algorithm 2 vectors: a Sentence-BERT phrase encoder, or GloVe word vectors for the needed words."""
+    from automatic_text_to_gesture.core import TOKEN, SentenceEncoder, load_glove
+    if kind == "glove":
+        words = {w for r in rules for w in TOKEN.findall(r.phrase.lower())} | {w for t in texts for w in TOKEN.findall(t.lower())}
+        return load_glove(ref, words)
+    return SentenceEncoder(ref)
+
+
+def _settings(args, source, kind, descriptors, encoder):
     return {"repo": PACKAGE, "source": str(source), "kind": kind, "selection": pm.selection(args),
             "takes": [d["take"] for d in descriptors], "role": args.role, "role_unit": args.role_unit,
             "seed": args.seed, "max_frames": args.max_frames, "preset": args.preset, "threshold": args.threshold,
             "percentile": args.threshold_percentile, "heldout": args.heldout_takes,
-            "glove": [str(glove), stat.st_size, int(stat.st_mtime)], "camera": [args.yaw, args.pitch],
+            "text_encoder": encoder, "camera": [args.yaw, args.pitch],
             "corruption": [args.noise, args.jitter, args.dropout], "min_similarity": args.min_similarity}
 
 
@@ -102,9 +147,9 @@ def split_video(data):
     return paths, segments
 
 
-def heldout_probe(clips, bank_path, rules, glove, threshold, seed):
-    """Unseen video windows: does GloVe retrieval of the window's phrase pick the gesture its pose matches best?"""
-    from automatic_text_to_gesture.core import TOKEN, GestureBank, aligned_phrase, load_glove, retrieve, window_scores
+def heldout_probe(clips, bank_path, rules, encoder, threshold, seed):
+    """Unseen video windows: does text retrieval of the window's phrase pick the gesture its pose matches best?"""
+    from automatic_text_to_gesture.core import GestureBank, aligned_phrase, retrieve, window_scores
     bank = dict(np.load(bank_path))
     gb = GestureBank(bank)
     rows = []
@@ -116,8 +161,7 @@ def heldout_probe(clips, bank_path, rules, glove, threshold, seed):
                 rows.append((phrase, gb.ids[int(np.argmax(row))], float(row.max())))
     if not rows or not rules:
         return {}, []
-    words = {w for r in rules for w in TOKEN.findall(r.phrase.lower())} | {w for p, _, _ in rows for w in TOKEN.findall(p.lower())}
-    vectors = load_glove(glove, words)
+    vectors = text_vectors(*encoder, rules, [p for p, _, _ in rows])
     hits = scored = 0
     for phrase, pose_best, _ in rows:
         slot = retrieve(phrase, rules, vectors, chunk_words=5, seed=seed)[0]
@@ -127,7 +171,8 @@ def heldout_probe(clips, bank_path, rules, glove, threshold, seed):
     gestures = len({r.gesture_id for r in rules})
     metrics = {"heldout_top1": round(hits / scored, 4) if scored else None,
                "heldout_chance": round(1 / gestures, 4), "heldout_windows": scored,
-               "heldout": "held-out video take: GloVe-retrieved gesture == best pose-matched bank gesture (never mined)"}
+               "heldout": f"held-out video take: {'GloVe' if encoder[0] == 'glove' else 'Sentence-BERT'}-retrieved gesture == "
+                          "best pose-matched bank gesture (never mined)"}
     return metrics, [p for p, _, _ in rows if len(p.split()) >= 4][:2]
 
 
@@ -135,16 +180,18 @@ def prepare(args):
     source, kind = pm.find_source(args.processed, args.beat_root)
     if source is None:
         return pm.not_ready("no local BEAT source found", pm.SOURCE_STEPS)
-    glove, why = find_glove(args.glove)
-    if glove is None:
-        return pm.not_ready(why, GLOVE_STEPS)
+    encoder_kind, encoder_ref, why, steps = find_encoder(args)
+    if encoder_ref is None:
+        return pm.not_ready(why, steps)
+    encoder = (encoder_kind, encoder_ref)
     beat = pm.ingest()
     select = pm.selection(args)
     descriptors = beat.list_takes(source, kind=kind, **select)
     if not descriptors:
         return pm.not_ready(f"no BEAT takes in {source} match the selection", pm.SOURCE_STEPS)
     code = [pm.ROOT / "src" / PACKAGE, Path(__file__), Path(pm.__file__), pm.SCRIPTS / "beat_demo" / "beat_ingest.py"]
-    folder = Path(args.output_root) / pm.cache_key(_settings(args, source, kind, descriptors, glove), code)
+    folder = Path(args.output_root) / pm.cache_key(_settings(args, source, kind, descriptors,
+                                                             encoder_fingerprint(*encoder)), code)
     if not args.force and pm.cached(folder):
         pm.progress(f"cached result {pm.portable(folder)}")
         return pm.ready(folder, pm.cached(folder), cached_result=True)
@@ -204,7 +251,8 @@ def prepare(args):
     for path in probe_paths:
         d = np.load(path)
         probes.append({"pose": d["pose"], "words": json.loads(str(d["words_json"]))})
-    heldout, probe_phrases = heldout_probe(probes, data / "bank.npz", rules, glove, threshold, args.seed)
+    pm.progress(f"held-out probe with {encoder_spec(*encoder)}")
+    heldout, probe_phrases = heldout_probe(probes, data / "bank.npz", rules, encoder, threshold, args.seed)
     timings["probe_seconds"] = round(time.perf_counter() - t0, 2)
 
     usage = {}
@@ -231,7 +279,8 @@ def prepare(args):
         "created": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat(),
         "source": {"path": str(source), "kind": kind, "takes": len(descriptors)},
         "roles": {**assignment, "probe_takes": [p.stem for p in probe_paths]}, "preset": args.preset,
-        "threshold": threshold, "threshold_rule": rule, "seed": args.seed, "glove": pm.portable(glove),
+        "threshold": threshold, "threshold_rule": rule, "seed": args.seed, "text_encoder": encoder_spec(*encoder),
+        **({"glove": pm.portable(encoder_ref)} if encoder_kind == "glove" else {}),
         "min_similarity": args.min_similarity, "fps": pm.FPS, "units": "cm (neck-centred)",
         "files": {"bank": pm.portable(data / "bank.npz"), "library": pm.portable(data / "library3d.npz"),
                   "library_info": "library.json", "rules": "rules.jsonl",
@@ -240,6 +289,7 @@ def prepare(args):
         "suggested_queries": suggested, "heldout_probes": probe_phrases,
         "summary": {"rules": len(rules), "bank_gestures": len(bank_ids), "threshold": threshold,
                     "heldout_top1": heldout.get("heldout_top1"), "heldout_chance": heldout.get("heldout_chance"),
+                    "text_encoder": encoder_spec(*encoder),
                     "data": f"BEAT {kind} speakers {', '.join(sorted({d['speaker'] for d in descriptors}, key=lambda s: (len(s), s)))} "
                             f"via beat_ingest export-automatic ({args.preset} preset)",
                     "seconds": timings["total_seconds"]},

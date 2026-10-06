@@ -75,8 +75,22 @@ def main() -> None:
     routes = {mode: [slot["map"] for slot in seq] for mode, seq in sequences.items()}
     if routes != {"auto": ["auto", "auto", "idle"], "manual": ["manual", "idle", "idle"], "hybrid": ["manual", "auto", "idle"]}:
         raise RuntimeError(f"unexpected map routes: {routes}")
+    # The default text encoder: all-MiniLM-L6-v2 phrase vectors (the substitution for GloVe), when a local copy exists.
+    sys.path.insert(0, str(ROOT / "src"))
+    from automatic_text_to_gesture.core import find_sentence_model
+    model = find_sentence_model(roots=(ROOT,))
+    sbert = "skipped: no local all-MiniLM-L6-v2 (python scripts/beat_demo/fetch_models.py downloads it)"
+    if model and Path(model).is_dir():
+        target = out / "sequence-auto-sbert.json"
+        subprocess.run(cli + ["retrieve", "--map", "auto", "--rules", str(out / "rules.jsonl"), "--sbert", model,
+                              "--text", text, "--audio-seconds", "3.0", "--output", str(target)], check=True)
+        slots = json.loads(target.read_text(encoding="utf-8"))
+        if slots[0]["map"] != "auto" or slots[0]["gesture_id"] != "forward_motion" or slots[0]["start_seconds"] != 0:
+            raise RuntimeError(f"Sentence-BERT retrieval did not pick the 'move forward' rule: {slots[0]}")
+        sbert = {"model": Path(model).name, "routes": [s["map"] for s in slots], "first_gesture": slots[0]["gesture_id"]}
     print(json.dumps({"clips": 2, "rules": len(rules), "threshold": report["threshold"],
-                      "window_pass_rate": report["at_threshold"]["window_pass_rate"], "routes": routes, "output": str(out)}))
+                      "window_pass_rate": report["at_threshold"]["window_pass_rate"], "routes": routes,
+                      "sentence_bert": sbert, "output": str(out)}))
 
 
 if __name__ == "__main__":

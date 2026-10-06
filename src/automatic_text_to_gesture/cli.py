@@ -7,8 +7,8 @@ from pathlib import Path
 
 import numpy as np
 
-from .core import (DEFAULTS, TOKEN, Clip, import_manual_map, load_glove, load_manual_map, mine_clips,
-                   read_rules, retrieve, write_manual_map, write_rules)
+from .core import (DEFAULTS, SBERT_NAME, TOKEN, Clip, SentenceEncoder, find_sentence_model, import_manual_map, load_glove,
+                   load_manual_map, mine_clips, read_rules, retrieve, write_manual_map, write_rules)
 
 
 def _config(args) -> dict:
@@ -105,7 +105,9 @@ def main(argv: list[str] | None = None) -> None:
     cal.add_argument("--output", required=True, help="report JSON")
     get = sub.add_parser("retrieve", help="retrieve a gesture sequence (Algorithm 2)")
     get.add_argument("--rules", help="auto rule map JSONL (needed for --map auto|hybrid)")
-    get.add_argument("--glove", help="GloVe text vectors (needed for --map auto|hybrid)")
+    get.add_argument("--sbert", help="Sentence-BERT folder or model name for phrase vectors (default: BEAT_SBERT_MODEL, "
+                                     "SBERT_MODEL or ./models/all-MiniLM-L6-v2)")
+    get.add_argument("--glove", help="optional alternative: the paper's GloVe text vectors, summed per phrase")
     get.add_argument("--manual", help="manual map JSON (attg-manual-map/1; see import-manual)")
     get.add_argument("--map", choices=("manual", "auto", "hybrid"), help="default: hybrid with --manual, else auto")
     get.add_argument("--text", required=True)
@@ -113,7 +115,7 @@ def main(argv: list[str] | None = None) -> None:
     get.add_argument("--chunk-words", dest="chunk_words", type=int, help=f"words per slot (default {DEFAULTS['chunk_words']})")
     get.add_argument("--oov", choices=("idle", "skip", "error"), help="chunk without vocabulary or match (default idle)")
     get.add_argument("--idle-id", dest="idle_id", help="gesture id for idle slots (default 'idle')")
-    get.add_argument("--min-similarity", type=float, help="optional GloVe similarity floor; below it the chunk goes idle")
+    get.add_argument("--min-similarity", type=float, help="optional similarity floor; below it the chunk goes idle")
     get.add_argument("--seed", type=int)
     get.add_argument("--config", help="JSON file overriding the paper defaults")
     get.add_argument("--output", required=True)
@@ -145,12 +147,23 @@ def main(argv: list[str] | None = None) -> None:
         manual = load_manual_map(args.manual) if args.manual else None
         rules, vectors = [], {}
         if mode != "manual":
-            if not args.rules or not args.glove:
-                raise SystemExit(f"--map {mode} needs --rules and --glove")
+            if not args.rules:
+                raise SystemExit(f"--map {mode} needs --rules")
+            if args.glove and args.sbert:
+                raise SystemExit("choose one text encoder: --sbert (default all-MiniLM-L6-v2) or --glove")
             rules = read_rules(args.rules)
-            words = {w for r in rules for w in TOKEN.findall(r.phrase.lower())}
-            words.update(TOKEN.findall(args.text.lower()))
-            vectors = load_glove(args.glove, words)
+            if args.glove:
+                words = {w for r in rules for w in TOKEN.findall(r.phrase.lower())}
+                words.update(TOKEN.findall(args.text.lower()))
+                vectors = load_glove(args.glove, words)
+            else:
+                model = find_sentence_model(args.sbert)
+                if model is None:
+                    raise SystemExit(f"--map {mode} needs a text encoder: no Sentence-BERT model at models/{SBERT_NAME} and "
+                                     "neither BEAT_SBERT_MODEL nor SBERT_MODEL is set. Run python scripts/beat_demo/fetch_models.py "
+                                     f"(python scripts/start_demo.py does this on first run), pass --sbert {SBERT_NAME} to let "
+                                     "sentence-transformers download it, or use --glove FILE for the paper's GloVe vectors")
+                vectors = SentenceEncoder(model)
         result = retrieve(args.text, rules, vectors, args.audio_seconds, mode=mode, manual=manual, chunk_words=conf["chunk_words"], seed=conf["seed"],
                           oov=conf["oov"], idle_id=conf["idle_id"], min_similarity=args.min_similarity)
         output = Path(args.output)

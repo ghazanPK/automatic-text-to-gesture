@@ -31,9 +31,13 @@ def make_server(a):
                 return query_application(root.parent, MODE, text, params)
             return example_query(MODE, text, params)
     elif MODE == "automatic":
-        from automatic_text_to_gesture.core import TOKEN, load_glove, mine_rules, retrieve
-        if not a.glove:
-            raise ValueError("automatic demo needs --glove")
+        from automatic_text_to_gesture.core import TOKEN, SentenceEncoder, load_glove, mine_rules, retrieve
+        encoder = None
+        if not a.glove:  # default: all-MiniLM-L6-v2 phrase vectors; --glove selects the paper's summed GloVe
+            model, why = pm.find_sbert(a.sbert)
+            if model is None:
+                raise ValueError(f"automatic demo needs a text encoder: {why}, or pass --glove FILE")
+            encoder = SentenceEncoder(model)
         video = np.load(a.data_dir / "video.npz")
         bank_npz = np.load(a.data_dir / "bank.npz")
         library = {key: bank_npz[key] for key in bank_npz.files}
@@ -44,14 +48,16 @@ def make_server(a):
             rules = mine_rules(video["pose"], words, library, threshold, a.seed)
             if not rules:
                 raise ValueError("no rules passed this pose-cosine threshold")
-            required = {w for rule in rules for w in TOKEN.findall(rule.phrase.lower())}
-            required.update(TOKEN.findall(text.lower()))
-            missing = required - vectors.keys()
-            if missing:
-                vectors.update(load_glove(a.glove, missing))
-            sequence = retrieve(text, rules, vectors, audio_seconds=float(params.get("duration", ["3"])[0]))
+            if encoder is None:
+                required = {w for rule in rules for w in TOKEN.findall(rule.phrase.lower())}
+                required.update(TOKEN.findall(text.lower()))
+                missing = required - vectors.keys()
+                if missing:
+                    vectors.update(load_glove(a.glove, missing))
+            sequence = retrieve(text, rules, encoder or vectors, audio_seconds=float(params.get("duration", ["3"])[0]))
             result = make_playback(sequence, library)
-            result.update({"algorithm": "frame-cosine rule mining + summed GloVe retrieval",
+            result.update({"algorithm": "frame-cosine rule mining + " + ("summed GloVe retrieval" if encoder is None else
+                                                                          "all-MiniLM-L6-v2 phrase retrieval"),
                            "threshold": threshold, "rule_count": len(rules),
                            "trace": sequence, "data_label": a.data_label})
             return result
@@ -63,7 +69,7 @@ def make_server(a):
         library_npz = np.load(a.data_dir / "units.npz")
         library = {str(k): v for k, v in zip(library_npz["ids"], library_npz["motion3d"])}
         groups = {int(k): [str(x) for x in d["ids"][d["labels"] == k]] for k in np.unique(d["labels"])}
-        encoder = SentenceTransformer(a.sbert or "all-MiniLM-L6-v2")
+        encoder = SentenceTransformer(pm.find_sbert(a.sbert)[0] or "all-MiniLM-L6-v2")
         def query(text, params):
             seed = int(params.get("seed", [str(a.seed)])[0])
             sequence = retrieve(text, rules, lambda x: encoder.encode(x, normalize_embeddings=True), groups, seed)
@@ -79,7 +85,7 @@ def make_server(a):
         library_npz = np.load(a.data_dir / "units.npz")
         library = {str(k): v for k, v in zip(library_npz["ids"], library_npz["motion3d"])}
         groups = {int(k): [str(x) for x in d["ids"][d["labels"] == k]] for k in np.unique(d["labels"])}
-        encoder = SentenceTransformer(a.sbert or "all-MiniLM-L6-v2")
+        encoder = SentenceTransformer(pm.find_sbert(a.sbert)[0] or "all-MiniLM-L6-v2")
         translations = json.loads(Path(a.translations).read_text(encoding="utf-8")) if a.translations else {}
         def query(text, params):
             language = params.get("language", ["en"])[0]
@@ -100,7 +106,7 @@ def make_server(a):
         ck = torch.load(a.checkpoint, map_location="cpu", weights_only=True)
         model = TextMotionModel(ck["text_dim"], ck["motion_dim"])
         model.load_state_dict(ck["state"]); model.eval()
-        encoder = SentenceTransformer(a.sbert or "all-MiniLM-L6-v2")
+        encoder = SentenceTransformer(pm.find_sbert(a.sbert)[0] or "all-MiniLM-L6-v2")
         library_npz = np.load(a.data_dir / "train_pairs.npz")
         library = {str(k): v for k, v in zip(library_npz["ids"], library_npz["motion"])}
         latent = ck["motion_latents"].cpu().numpy().astype("float32")
@@ -167,8 +173,8 @@ def main():
     p.add_argument("--rules", type=Path)
     p.add_argument("--clusters", type=Path)
     p.add_argument("--checkpoint", type=Path)
-    p.add_argument("--glove", type=Path)
-    p.add_argument("--sbert", help="Sentence-BERT name or directory (default all-MiniLM-L6-v2; prepared mode: the model recorded by prepare_paper_method.py)")
+    p.add_argument("--glove", type=Path, help="automatic: optional GloVe text vectors instead of all-MiniLM-L6-v2 phrase vectors")
+    p.add_argument("--sbert", help="Sentence-BERT name or directory (default: BEAT_SBERT_MODEL, SBERT_MODEL or models/all-MiniLM-L6-v2)")
     p.add_argument("--translations", type=Path)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--data-label", default="User-prepared motion")

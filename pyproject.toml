@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Independent educational reimplementation of automatic text-to-gesture rule mining"
 requires-python = ">=3.10"
 license = {text = "MIT"}
-dependencies = ["numpy>=1.24"]
+dependencies = ["numpy>=1.24", "sentence-transformers>=2.2"]  # all-MiniLM-L6-v2 phrase vectors; GloVe needs nothing extra
 
 [project.scripts]
 attg = "automatic_text_to_gesture.cli:main"

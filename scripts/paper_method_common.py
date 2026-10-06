@@ -1,7 +1,7 @@
 """Helpers shared by ``prepare_paper_method.py`` and the prepared demo mode.
 
 This file belongs to the repository (it is not a vendored shared file). It
-finds a local BEAT source, a Sentence-BERT directory or GloVe file, runs this
+finds a local BEAT source and a Sentence-BERT directory, runs this
 repository's own command line in-process, caches results by their settings,
 prints the launcher's final JSON line and serves the prepared browser API.
 BEAT loading itself goes through the vendored ``scripts/beat_demo/beat_ingest.py``.
@@ -27,8 +27,9 @@ OUTPUTS = ROOT / "outputs" / "paper-method"
 SBERT_NAME = "all-MiniLM-L6-v2"
 DEFAULT_SBERT_DIR = ROOT / "models" / SBERT_NAME
 ENV_PROCESSED, ENV_RAW, ENV_SBERT, ENV_GLOVE = "BEAT_PROCESSED_ROOT", "BEAT_RAW_ROOT", "SBERT_MODEL", "GLOVE_PATH"
-SBERT_STEP = (f"python -c \"from sentence_transformers import SentenceTransformer; "
-              f"SentenceTransformer('{SBERT_NAME}').save('models/{SBERT_NAME}')\"")
+ENV_SBERT_ORDER = ("BEAT_SBERT_MODEL", ENV_SBERT)  # the lookup order of the shared demo layer
+SBERT_STEP = ("python scripts/beat_demo/fetch_models.py (downloads all-MiniLM-L6-v2, about 92 MB, into ignored "
+              "models/; python scripts/start_demo.py does this on first run)")
 FPS = 15
 UNIT_SECONDS = 3.0
 API_PATHS = {"/api/beat-library", "/api/beat-query", "/api/query"}
@@ -164,15 +165,20 @@ def role_spec(args):
 
 
 def find_sbert(value=None):
-    """Return (model path or name, None) or (None, instructions). No model is downloaded implicitly."""
+    """Return (model path or name, None) or (None, instructions).
+
+    Lookup order: ``value``, ``BEAT_SBERT_MODEL``, ``SBERT_MODEL``, ``models/all-MiniLM-L6-v2``. Nothing is
+    downloaded here; ``scripts/start_demo.py`` fetches the default model on first run.
+    """
     if value:
         path = Path(value)
         return (str(path.resolve()) if path.exists() else str(value)), None
-    if os.environ.get(ENV_SBERT):
-        return os.environ[ENV_SBERT], None
+    for name in ENV_SBERT_ORDER:
+        if os.environ.get(name):
+            return os.environ[name], None
     if DEFAULT_SBERT_DIR.is_dir():
         return str(DEFAULT_SBERT_DIR.resolve()), None
-    return None, (f"Sentence-BERT was not found at models/{SBERT_NAME}. Save it once with: {SBERT_STEP} "
+    return None, (f"Sentence-BERT was not found at models/{SBERT_NAME}. Download it once with: {SBERT_STEP}; "
                   f"then rerun, or pass --sbert <local directory> (env {ENV_SBERT})")
 
 

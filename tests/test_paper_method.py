@@ -36,9 +36,10 @@ def prepared(tmp_path_factory):
     base = tmp_path_factory.mktemp("automatic")
     source = beat_fixture.make_processed(base / "processed", speakers=SPEAKERS.split(","), takes=2)
     glove = beat_fixture.make_glove(base / "glove.txt")
-    argv = ["--processed", str(source), "--glove", str(glove), "--output-root", str(base / "out"), "--speakers", SPEAKERS]
+    sbert = beat_fixture.make_sbert(base / "sbert")  # tiny local stand-in for all-MiniLM-L6-v2 (no download)
+    argv = ["--processed", str(source), "--sbert", str(sbert), "--output-root", str(base / "out"), "--speakers", SPEAKERS]
     code, result = run(argv)
-    return {"code": code, "result": result, "argv": argv, "glove": glove, "source": source}
+    return {"code": code, "result": result, "argv": argv, "glove": glove, "sbert": sbert, "source": source}
 
 
 def manifest_of(result):
@@ -64,6 +65,9 @@ def test_processed_route_mines_disjoint_video_against_library_bank(prepared):
     assert 0 <= metrics["heldout_top1"] <= 1 and metrics["heldout_chance"] == round(1 / metrics["distinct_rule_gestures"], 4)
     library = np.load(pm.resolve(manifest["files"]["library"]))
     assert set(map(str, library["ids"])) == set(bank.files) and library["motion"].shape[1:] == (45, 33)
+    # Default text encoder: Sentence-BERT phrase vectors (the all-MiniLM-L6-v2 substitution), recorded by name only.
+    assert manifest["text_encoder"] == {"kind": "sentence-bert", "model": "sbert"} and "glove" not in manifest
+    assert "Sentence-BERT" in metrics["heldout"]
 
 
 def test_cached_and_paper_threshold(prepared, tmp_path):
@@ -73,21 +77,26 @@ def test_cached_and_paper_threshold(prepared, tmp_path):
     assert result["ready"] and manifest_of(result)["threshold"] == 0.92
 
 
-def test_raw_bvh_textgrid_route(tmp_path, prepared):
+def test_raw_bvh_textgrid_route_with_optional_glove(tmp_path, prepared):
     raw = beat_fixture.make_raw(tmp_path / "beat_english_v0.2.1", speakers=SPEAKERS.split(","), takes=2)
     code, result = run(["--beat-root", str(raw), "--glove", str(prepared["glove"]), "--output-root", str(tmp_path / "out"),
                         "--speakers", SPEAKERS])
     assert code == 0 and result["ready"], result
-    assert manifest_of(result)["source"]["kind"] == "raw"
+    manifest = manifest_of(result)
+    assert manifest["source"]["kind"] == "raw" and manifest["text_encoder"]["kind"] == "glove" and manifest["glove"]
+    assert "GloVe" in manifest["metrics"]["heldout"]
 
 
-def test_missing_source_or_glove_is_not_ready(tmp_path, monkeypatch, prepared):
-    for name in (pm.ENV_PROCESSED, pm.ENV_RAW, pm.ENV_GLOVE):
+def test_missing_source_or_encoder_is_not_ready(tmp_path, monkeypatch, prepared):
+    for name in (pm.ENV_PROCESSED, pm.ENV_RAW, pm.ENV_GLOVE, *pm.ENV_SBERT_ORDER):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(pm, "ROOT", tmp_path)
+    monkeypatch.setattr(pm, "DEFAULT_SBERT_DIR", tmp_path / "models" / pm.SBERT_NAME)
     code, result = run(["--output-root", str(tmp_path / "out")])
     assert code == 0 and result["ready"] is False and "BEAT" in result["reason"]
     code, result = run(["--processed", str(prepared["source"]), "--output-root", str(tmp_path / "out")])
+    assert result["ready"] is False and "Sentence-BERT" in result["reason"] and "fetch_models.py" in result["next_steps"][0]
+    code, result = run(["--processed", str(prepared["source"]), "--encoder", "glove", "--output-root", str(tmp_path / "out")])
     assert result["ready"] is False and "GloVe" in result["reason"] and "glove.6B" in result["next_steps"][0]
 
 
@@ -107,7 +116,7 @@ def test_glove_subset_keeps_frequent_and_beat_words(tmp_path, prepared):
 def server(prepared):
     import demo_server
     args = argparse.Namespace(prepared=Path(prepared["result"]["server_args"][2]), example=False, glove=None,
-                              host="127.0.0.1", port=0)
+                              sbert=str(prepared["sbert"]), host="127.0.0.1", port=0)
     httpd = demo_server.make_server(args)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{httpd.server_port}"
@@ -122,6 +131,7 @@ def get(url):
 def test_prepared_server_library_threshold_and_idle(server, prepared):
     library = get(server + "/api/beat-library")
     assert library["ready"] and library["prepared"] and library["clips"] and library["suggested_queries"]
+    assert library["text_encoder"] == "sentence-bert (sbert)" and "all-MiniLM-L6-v2" in library["algorithm"]
     threshold = library["default_threshold"]
     assert "percentile" in library["threshold_rule"] and threshold == manifest_of(prepared["result"])["threshold"]
     query = library["suggested_queries"][0]
@@ -134,5 +144,6 @@ def test_prepared_server_library_threshold_and_idle(server, prepared):
     assert loose["rule_count"] > library["metrics"]["rules"]  # the viewer threshold re-mines Algorithm 1
     idle = get(server + "/api/beat-query?" + urllib.parse.urlencode({"text": "zzzz qqqq"}))
     assert idle["no_match"] is True and idle["slots"][0]["route"] == "idle_no_match"
+    assert "Sentence-BERT vocabulary" in idle["slots"][0]["rule_source"]["reason"]
     with pytest.raises(urllib.error.HTTPError):
         get(server + "/api/beat-query?" + urllib.parse.urlencode({"text": "open", "threshold": 3}))

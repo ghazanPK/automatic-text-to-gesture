@@ -40,7 +40,7 @@ Comparison with manual rule maps; gesture variety and user perception
 
 ## Explore the implementation
 
-Timed pose/phrase mining over many clips with a padding-aware frame cosine at the paper's 0.92 threshold and a calibration report, summed-GloVe retrieval with Manual, Auto and Hybrid rule maps, and a BEAT route with disjoint library and video speakers.
+Timed pose/phrase mining over many clips with a padding-aware frame cosine at the paper's 0.92 threshold and a calibration report, five-word chunk retrieval with Manual, Auto and Hybrid rule maps using all-MiniLM-L6-v2 phrase vectors (a documented substitution for the paper's summed GloVe, which remains optional), and a BEAT route with disjoint library and video speakers.
 
 This repository contains independently written research code. The institute's original source, datasets and trained models are not distributed. Public-data preparation, commands, assumptions and checks are documented below and in [REQUIREMENTS.md](REQUIREMENTS.md).
 
@@ -91,7 +91,18 @@ python scripts/prepare_viewer.py --out static/vendor
 python scripts/demo_server.py --example
 ```
 
-The pipeline centers upper-body 2D poses at the neck, slides projected gesture-bank clips over a timed video pose stream, accepts frame-cosine matches at the paper's `0.92` threshold, and records up-to-five-word phrases. The frame-cosine mean covers only the gesture's real frames, so a short gesture centre-padded into a longer window can still match. Mining loops over any number of video clips (Algorithm 1's outer loop) and writes a threshold-calibration report. Runtime retrieval sums GloVe word vectors for each five-word chunk and selects the most similar stored phrase. The paper's three maps are available: Manual (NVBG-style keyword rules), Auto (mined rules) and Hybrid (manual keyword match first, GloVe otherwise). The browser's local BEAT index is a compact simulation of weak association over a fixed bank; [Wild Pose Matching](https://github.com/ghazanPK/wild-pose-matching) later replaces this mean pose match with learned matching.
+The pipeline centers upper-body 2D poses at the neck, slides projected gesture-bank clips over a timed video pose stream, accepts frame-cosine matches at the paper's `0.92` threshold, and records up-to-five-word phrases. The frame-cosine mean covers only the gesture's real frames, so a short gesture centre-padded into a longer window can still match. Mining loops over any number of video clips (Algorithm 1's outer loop) and writes a threshold-calibration report. Runtime retrieval encodes each five-word chunk and every stored phrase and selects the most similar stored phrase by cosine; slot timing divides the audio duration over the chunks. Phrase vectors come from all-MiniLM-L6-v2 by default, in place of the paper's summed GloVe vectors, which remain optional (see [Text encoder](#text-encoder-minilm-substitution)). The paper's three maps are available: Manual (NVBG-style keyword rules), Auto (mined rules) and Hybrid (manual keyword match first, phrase vectors otherwise). The browser's local BEAT index is a compact simulation of weak association over a fixed bank; [Wild Pose Matching](https://github.com/ghazanPK/wild-pose-matching) later replaces this mean pose match with learned matching.
+
+### Text encoder: MiniLM substitution
+
+The paper sums 300-D GloVe word vectors into a phrase vector. This implementation uses the Sentence-BERT model [all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2) instead, and keeps GloVe as an optional alternative.
+
+- **Unchanged.** Algorithm 2 keeps its structure: fixed five-word chunks (a shorter remainder is dropped), the stored rule phrase with the highest cosine, slot timing that divides the audio duration evenly over the chunks, and the Manual, Auto and Hybrid maps.
+- **Changed.** Only the phrase vector differs: MiniLM encodes the whole chunk or rule phrase instead of summing word vectors. A chunk with no whole word in the model's vocabulary is out of vocabulary and plays idle, as a chunk without GloVe words does. Similarity values therefore differ from GloVe values.
+- **Why.** The GloVe 6B archive is an 820 MB download. MiniLM is about 92 MB (Apache-2.0), and the other gesture repositories already use it (owner decision, 6 October 2026).
+- **Download.** `python scripts/start_demo.py` downloads it once into ignored `models/all-MiniLM-L6-v2` from a pinned Hugging Face revision and reuses it afterwards. `python scripts/beat_demo/fetch_models.py` does the same on its own. `--offline` or `PAPERREACH_OFFLINE=1` skips the download, and a failed download is reported without stopping the demo. Models are never committed.
+- **Lookup order.** `--sbert`, then `BEAT_SBERT_MODEL`, then `SBERT_MODEL`, then `models/all-MiniLM-L6-v2`. `attg retrieve` looks for `models/` in the working directory.
+- **GloVe (optional).** Download `glove.6B.zip` from the [GloVe project](https://nlp.stanford.edu/projects/glove/) and extract `glove.6B.300d.txt` into `data/glove/`. Then pass `attg retrieve --glove FILE`, `scripts/prepare_paper_method.py --encoder glove` (or `--glove FILE`), or `scripts/demo_server.py --glove FILE`. `scripts/build_glove_subset.py` cuts the file to the 20,000 most frequent words plus every word spoken in your BEAT copy. The shared browser demo uses GloVe when `BEAT_GLOVE_PATH` or `GLOVE_PATH` names a file.
 
 ### Reproduce with BEAT
 
@@ -104,17 +115,12 @@ The pipeline centers upper-body 2D poses at the neck, slides projected gesture-b
 
 Roles are assigned per speaker with a fixed `--seed`. `--role library=1,2 --role video=rest` overrides them.
 
-**1. GloVe.** Retrieval sums GloVe vectors (Algorithm 2), so the hook needs a GloVe text file and never downloads one.
-1. Download `glove.6B.zip` from the [GloVe project](https://nlp.stanford.edu/projects/glove/) (about 820 MB).
-2. Extract `glove.6B.300d.txt` into `data/glove/`.
-3. Optionally, cut it to the 20,000 most frequent words plus every word spoken in your BEAT copy:
+**1. Text encoder.** Retrieval (Algorithm 2) uses all-MiniLM-L6-v2 from `models/all-MiniLM-L6-v2`, which `scripts/start_demo.py` downloads on first run (or run `python scripts/beat_demo/fetch_models.py`). `--sbert DIR` selects another local model. For the paper's GloVe instead, pass `--encoder glove`: the hook then uses `data/glove/glove.6B.300d.subset.txt`, then `data/glove/glove.6B.300d.txt`, and `--glove FILE` or the `GLOVE_PATH` environment variable selects another file. Optionally, cut GloVe down first:
 
 ```bash
 python scripts/build_glove_subset.py --glove data/glove/glove.6B.300d.txt --vocab-from /path/to/processed/beat \
   --output data/glove/glove.6B.300d.subset.txt
 ```
-
-The hook uses `data/glove/glove.6B.300d.subset.txt`, then `data/glove/glove.6B.300d.txt`. `--glove FILE` or the `GLOVE_PATH` environment variable selects another file.
 
 **2a. Processed OmniMo collection.** The collection is laid out as `<root>/<speaker>/{meta.json,motion.npz}`:
 
@@ -134,13 +140,12 @@ for take in 1_wayne_0_1_1 1_wayne_0_2_2 2_scott_0_1_1 2_scott_0_2_2 3_solomon_0_
   spk=${take%%_*}; mkdir -p data/beat/beat_english_v0.2.1/$spk
   for ext in bvh TextGrid; do curl -fL -o data/beat/beat_english_v0.2.1/$spk/$take.$ext $base/$spk/$take.$ext; done
 done
-python scripts/build_glove_subset.py --glove data/glove/glove.6B.300d.txt --vocab-from data/beat/beat_english_v0.2.1
 python scripts/prepare_paper_method.py --beat-root data/beat/beat_english_v0.2.1
 ```
 
 **Launcher.** `python scripts/start_demo.py` runs this hook after the shared BEAT demo preparation.
 - **Source.** It looks in `--processed` or `--beat-root`, then `BEAT_PROCESSED_ROOT` or `BEAT_RAW_ROOT`, then `data/beat/processed` or `data/beat/beat_english_v0.2.1`.
-- **Missing input.** Without a source or GloVe, it prints the next step and the default demo starts unchanged.
+- **Missing input.** Without a source or text encoder, it prints the next step and the default demo starts unchanged.
 - **Cache.** Results are cached in ignored `outputs/paper-method/<settings hash>/`. A repeat launch with the same settings returns at once; `--force` rebuilds.
 
 **Threshold.** On projected BEAT poses, the paper's 0.92 sits near the median window–gesture frame cosine. Most of the bank would then pass most windows, so the random pick would make rules arbitrary. `--preset demo` (the default) therefore runs `attg calibrate` and mines at the 95th percentile of the window–gesture scores, rounded to 0.01; `--threshold-percentile` changes it. `--preset paper`, or an explicit `--threshold`, mines at that value. The viewer's slider starts at the prepared threshold. Moving it re-mines the prepared video clips before retrieval.
@@ -149,8 +154,8 @@ python scripts/prepare_paper_method.py --beat-root data/beat/beat_english_v0.2.1
 
 **Viewer.**
 - `/api/beat-library` lists the bank clips, the calibration metrics and the default threshold. Its suggested queries include mined rule phrases and held-out probes, which are phrases from the held-out video take.
-- `/api/beat-query` returns each five-word chunk's bank frames with route `mined_pose_rule`, its GloVe similarity and the matched rule phrase. A chunk without GloVe vocabulary, or below an optional `min_similarity`, returns `idle_no_match`.
-- The stored held-out metric asks how often GloVe retrieval of a held-out phrase picks the bank gesture that its pose matches best. Chance is one over the number of distinct rule gestures.
+- `/api/beat-query` returns each five-word chunk's bank frames with route `mined_pose_rule`, its text similarity and the matched rule phrase; `text_encoder` names the encoder. A chunk without an in-vocabulary word, or below an optional `min_similarity`, returns `idle_no_match`.
+- The stored held-out metric asks how often text retrieval of a held-out phrase picks the bank gesture that its pose matches best. Chance is one over the number of distinct rule gestures.
 
 **Limits.** Projected BEAT motion stands in for the paper's 106 hours of public video and its separately animated library; it is not the paper's data. At demo scale the mined map covers few words, and text–gesture agreement on held-out phrases is only modestly above chance.
 
@@ -170,9 +175,9 @@ Run the offline verification workflow before preparing a dataset:
 python scripts/verify.py
 ```
 
-It procedurally creates two clips (`clip_a.npz`, `clip_b.npz`), a variable-length `bank.npz` and a 300-D GloVe-format fixture. It then runs the installed CLI: `mine` over both clips at `0.92`, `import-manual` on the authored `examples/manual_map_nvbg.xml`, and `retrieve` with each of `--map auto|manual|hybrid`. Inspect `rules.jsonl`, `rules.jsonl.calibration.json` and `sequence-*.json` in that directory. Replace those generated files with real arrays using the contracts below; no code path changes are required.
+It procedurally creates two clips (`clip_a.npz`, `clip_b.npz`), a variable-length `bank.npz` and a 300-D GloVe-format fixture. It then runs the installed CLI: `mine` over both clips at `0.92`, `import-manual` on the authored `examples/manual_map_nvbg.xml`, and `retrieve` with each of `--map auto|manual|hybrid` on the GloVe fixture. When `models/all-MiniLM-L6-v2` exists, it also runs `retrieve --sbert` and checks that the first chunk selects the `move forward` rule; otherwise it reports that check as skipped. Inspect `rules.jsonl`, `rules.jsonl.calibration.json` and `sequence-*.json` in that directory. Replace those generated files with real arrays using the contracts below; no code path changes are required.
 
-Prepare downloads yourself. Suitable public replacements are the [TED Gesture Dataset](https://github.com/youngwoo-yoon/Co-Speech_Gesture_Generation) for aligned talk pose/text and a redistributable animation library you have rights to use. Download `glove.6B.300d.txt` from the [GloVe project](https://nlp.stanford.edu/projects/glove/). ICT Virtual Human Toolkit animations referenced by the paper are not bundled; check their own access and license terms.
+Prepare downloads yourself. Suitable public replacements are the [TED Gesture Dataset](https://github.com/youngwoo-yoon/Co-Speech_Gesture_Generation) for aligned talk pose/text and a redistributable animation library you have rights to use. The default text encoder is downloaded by `scripts/start_demo.py` or `scripts/beat_demo/fetch_models.py`; GloVe is optional (see [Text encoder](#text-encoder-minilm-substitution)). ICT Virtual Human Toolkit animations referenced by the paper are not bundled; check their own access and license terms.
 
 Each video NPZ contains `pose: float32[F,J,2]`, a scalar `words_json` (a JSON list of `{word,start_frame,end_frame}`) and an optional scalar `clip_id`. `bank.npz` contains one `[F,J,2]` array per gesture ID; gestures may differ in length. All files must use the same joint order, coordinates, FPS, and neck index (default 1). Project 3D bank motion into the same camera convention before use.
 
@@ -180,10 +185,12 @@ Each video NPZ contains `pose: float32[F,J,2]`, a scalar `words_json` (a JSON li
 attg mine --video data/clip_001.npz data/clip_002.npz --bank data/bank.npz --output outputs/rules.jsonl
 attg mine --manifest data/clips.txt --bank data/bank.npz --threshold-percentile 95 --output outputs/rules.jsonl
 attg calibrate --manifest data/clips.txt --bank data/bank.npz --output outputs/calibration.json
-attg retrieve --rules outputs/rules.jsonl --glove data/glove.6B.300d.txt \
+attg retrieve --rules outputs/rules.jsonl \
   --text "we can move forward together today" --audio-seconds 2.8 --output outputs/sequence.json
+attg retrieve --rules outputs/rules.jsonl --glove data/glove/glove.6B.300d.txt \
+  --text "we can move forward together today" --output outputs/sequence-glove.json   # optional GloVe
 attg import-manual --input my_nvbg_rules.xml --output data/manual_map.json
-attg retrieve --map hybrid --manual data/manual_map.json --rules outputs/rules.jsonl --glove data/glove.6B.300d.txt \
+attg retrieve --map hybrid --manual data/manual_map.json --rules outputs/rules.jsonl \
   --text "we will never give up on this" --output outputs/sequence.json
 attg config
 python -m pytest
@@ -192,8 +199,8 @@ python -m pytest
 - **Mining.** `--video` accepts several files and repeats. `--manifest` lists one NPZ per line, or a JSON list. Rule `source` is the clip ID (made unique), plus the frame interval. The stride is the longest bank gesture.
 - **Calibration report.** `mine` saves it to `<output>.calibration.json` and prints a summary. It covers score percentiles, and per-threshold window pass rate and bank pass fraction. It warns when most of the bank passes most windows, which makes the random pick arbitrary. `--threshold-percentile P` sets the threshold to the P-th percentile of all window-by-gesture scores instead of `0.92`.
 - **Manual map.** The format is JSON `{"format":"attg-manual-map/1","rules":[{"keyword","patterns":[...],"gestures":[...],"priority"}]}`; see [examples/manual_map.json](examples/manual_map.json). `import-manual` converts an NVBG-like XML table (`<rule keyword priority><pattern/>…<animation/></rule>`) or a CSV table (`keyword,patterns,gestures,priority`, with `|` between items). Gesture IDs must exist in your bank; the fixture's IDs match the `verify.py` bank.
-- **Map modes.** A manual rule matches when one of its patterns appears as contiguous words in the chunk. Higher priority wins, then the longer pattern; one of the rule's gestures is picked at random. `--map manual` sends unmatched chunks to idle. `--map hybrid` tries the manual map first, then GloVe. `--map auto` uses GloVe only.
-- **Idle slots.** A chunk with no GloVe vocabulary, or below the optional `--min-similarity`, becomes an idle slot (`--idle-id`, default `idle`). `--oov skip` drops it instead, and `--oov error` restores the old exception.
+- **Map modes.** A manual rule matches when one of its patterns appears as contiguous words in the chunk. Higher priority wins, then the longer pattern; one of the rule's gestures is picked at random. `--map manual` sends unmatched chunks to idle. `--map hybrid` tries the manual map first, then the phrase vectors. `--map auto` uses the phrase vectors only.
+- **Idle slots.** A chunk with no in-vocabulary word, or below the optional `--min-similarity`, becomes an idle slot (`--idle-id`, default `idle`). `--oov skip` drops it instead, and `--oov error` restores the old exception.
 - **Defaults.** `attg config` prints them: threshold, phrase length, chunk size, neck joint, seed and OOV policy. A JSON file passed with `--config` overrides them.
 
 The rule file records phrase, gesture ID, similarity, frame interval, and source. Retrieval produces ordered gesture slots with route (`manual`, `auto` or `idle`), semantic score and optional speech timing.
@@ -205,7 +212,7 @@ Use a BVH file you have permission to process and a JSONL transcript with either
 ```bash
 python scripts/prepare_public_data.py --bvh data/licensed_motion.bvh --transcript data/words.jsonl --output-dir data/prepared
 attg mine --video data/prepared/video.npz --bank data/prepared/bank.npz --output outputs/rules.jsonl
-attg retrieve --rules outputs/rules.jsonl --glove data/glove.6B.300d.txt --text "move forward together" --audio-seconds 3 --output outputs/sequence.json
+attg retrieve --rules outputs/rules.jsonl --text "move forward together" --audio-seconds 3 --output outputs/sequence.json
 python scripts/export_playback.py --sequence outputs/sequence.json --motion data/prepared/bank.npz --output outputs/playback.json
 ```
 
@@ -215,22 +222,22 @@ Install the local 3D viewer dependency and run the live query demo:
 
 ```bash
 python scripts/prepare_viewer.py --out static/vendor
-python scripts/demo_server.py --data-dir data/prepared --glove data/glove.6B.300d.txt
+python scripts/demo_server.py --data-dir data/prepared   # add --glove FILE for the paper's GloVe
 ```
 
-Open the printed local URL. The pose-cosine slider re-mines rules at the selected threshold; the trace shows selected gesture IDs and GloVe similarity while the viewer plays the corresponding recorded frames. [Wild pose matching](https://github.com/ghazanPK/wild-pose-matching) is a later research continuation of the automatic mining lineage, not a software dependency.
+Open the printed local URL. The pose-cosine slider re-mines rules at the selected threshold; the trace shows selected gesture IDs and text similarity while the viewer plays the corresponding recorded frames. [Wild pose matching](https://github.com/ghazanPK/wild-pose-matching) is a later research continuation of the automatic mining lineage, not a software dependency.
 
 For a Flow Human integration, export the optional portable rule map:
 
 ```bash
-python scripts/export_flow_map.py --rules outputs/rules.jsonl --bank data/prepared/bank.npz --glove data/glove.6B.300d.txt --extra-words data/query-vocabulary.txt --output outputs/flow-rule-map.json
+python scripts/export_flow_map.py --rules outputs/rules.jsonl --bank data/prepared/bank.npz --glove data/glove/glove.6B.300d.txt --extra-words data/query-vocabulary.txt --output outputs/flow-rule-map.json
 ```
 
-The JSON contract is `{"rules":[{"phrase":"...","gesture":"...","frames":[...],"fps":15}],"vectors":{"word":[...]}}`. `--extra-words` is optional, one anticipated query word per line; without it only words in rule phrases are exported. An omitted `--glove` leaves out vectors, allowing an importing app to use an explicitly identified lexical baseline. Motion frames come from the bank, not from generated animation.
+The JSON contract is `{"rules":[{"phrase":"...","gesture":"...","frames":[...],"fps":15}],"vectors":{"word":[...]}}`. `--extra-words` is optional, one anticipated query word per line; without it only words in rule phrases are exported. `--glove` is optional; an omitted `--glove` leaves out vectors, and Flow Human then matches the exported phrases with its own Sentence-BERT (all-MiniLM-L6-v2) or an explicitly identified lexical baseline. Motion frames come from the bank, not from generated animation.
 
 ### Scope and limitations
 
-This repository starts after pose estimation, word alignment, and gesture projection. It does not include videos, motion capture, GloVe, trained weights, Unity assets, or private counts/results. Cosine matching is sensitive to camera and skeleton conventions, GloVe sum pooling is intentionally the paper-era baseline, and retrieval can repeat or select weak semantic matches. Dataset and animation licenses remain separate from this MIT-licensed code (see [LICENSE](LICENSE)).
+This repository starts after pose estimation, word alignment, and gesture projection. It does not include videos, motion capture, word vectors, text-encoder or trained weights, Unity assets, or private counts/results; the MiniLM text encoder is downloaded on first run. Cosine matching is sensitive to camera and skeleton conventions. MiniLM phrase vectors replace the paper-era GloVe sum pooling, so similarity values differ from the paper's, and retrieval can repeat or select weak semantic matches. Dataset and animation licenses remain separate from this MIT-licensed code (see [LICENSE](LICENSE)).
 
 ### Citation
 

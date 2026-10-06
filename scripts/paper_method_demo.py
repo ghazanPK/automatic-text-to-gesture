@@ -3,8 +3,9 @@
 ``scripts/demo_server.py --prepared outputs/paper-method/<key>`` loads the
 artifacts written by ``prepare_paper_method.py`` and answers ``/api/beat-library``,
 ``/api/beat-query`` and ``/api/query`` with the repository's own Algorithm 2:
-five-word chunks, summed GloVe vectors, the most similar mined phrase and its
-bank gesture. A different threshold or seed from the viewer re-mines the
+five-word chunks, all-MiniLM-L6-v2 phrase vectors (or the optional summed GloVe
+vectors when the method was prepared with them), the most similar mined phrase
+and its bank gesture. A different threshold or seed from the viewer re-mines the
 prepared video clips (Algorithm 1) before retrieval.
 """
 from __future__ import annotations
@@ -16,8 +17,10 @@ import numpy as np
 import paper_method_common as pm
 
 ALGORITHM = ("Automatic Text-to-Gesture: frame-cosine mining of timed <=5-word phrases from projected+corrupted "
-             "BEAT video-role takes against a frontal 2D gesture bank (Algorithm 1), summed-GloVe retrieval of "
-             "five-word chunks (Algorithm 2)")
+             "BEAT video-role takes against a frontal 2D gesture bank (Algorithm 1), five-word chunk retrieval by "
+             "the most similar mined phrase (Algorithm 2) with all-MiniLM-L6-v2 phrase vectors in place of the "
+             "paper's summed GloVe")
+ALGORITHM_GLOVE = ALGORITHM.split(" with all-MiniLM")[0] + " with the paper's summed GloVe vectors"
 DATA_LABEL = "Public BEAT, disjoint library/video speakers; projected BEAT motion stands in for video pose"
 
 
@@ -39,11 +42,23 @@ class PreparedDemo:
         self.motion = {str(i): m for i, m in zip(library["ids"], library["motion"])}
         self.info = {r["id"]: r for r in json.loads((self.folder / files["library_info"]).read_text(encoding="utf-8"))}
         self.rest = np.median(np.stack([m.reshape(len(m), -1, 3)[0] for m in self.motion.values()]), axis=0)
-        glove = getattr(args, "glove", None) or self.manifest["glove"]
-        self.glove = pm.resolve(glove)
-        if not self.glove.is_file():
-            raise FileNotFoundError(f"GloVe file {self.glove} is missing; rerun prepare_paper_method.py --glove <file>")
+        # Prepared with Sentence-BERT (default) or the optional GloVe; older manifests name only a GloVe file.
+        spec = self.manifest.get("text_encoder") or {"kind": "glove", "file": self.manifest.get("glove")}
+        self.encoder_kind = "glove" if getattr(args, "glove", None) else spec["kind"]
         self.vectors = {}
+        if self.encoder_kind == "glove":
+            self.glove = pm.resolve(getattr(args, "glove", None) or spec.get("file") or self.manifest["glove"])
+            if not self.glove.is_file():
+                raise FileNotFoundError(f"GloVe file {self.glove} is missing; rerun prepare_paper_method.py --glove <file>")
+            self.encoder_label = f"glove ({self.glove.name})"
+        else:
+            from automatic_text_to_gesture.core import SentenceEncoder
+            model, why = pm.find_sbert(getattr(args, "sbert", None))
+            if model is None:
+                raise FileNotFoundError(why)
+            self.encoder = SentenceEncoder(model)
+            self.encoder_label = self.encoder.label
+        self.algorithm = ALGORITHM_GLOVE if self.encoder_kind == "glove" else ALGORITHM
 
     def library(self):
         clips = [{"id": gid, "text": row.get("text", ""), "duration": len(self.motion[gid]) / pm.FPS,
@@ -54,7 +69,8 @@ class PreparedDemo:
         return {"ready": True, "prepared": True, "mode": "automatic", "clips": clips, "suggested_queries": suggested,
                 "heldout_probes": self.manifest["heldout_probes"], "metrics": self.manifest["metrics"],
                 "roles": self.manifest["roles"]["roles"], "default_threshold": self.manifest["threshold"],
-                "threshold_rule": self.manifest["threshold_rule"], "algorithm": ALGORITHM, "data_label": DATA_LABEL}
+                "threshold_rule": self.manifest["threshold_rule"], "algorithm": self.algorithm, "data_label": DATA_LABEL,
+                "text_encoder": self.encoder_label}
 
     def _rules(self, threshold, seed):
         from automatic_text_to_gesture.core import mine_clips
@@ -68,6 +84,8 @@ class PreparedDemo:
         return self.mined[key]
 
     def _vectors(self, rules, text):
+        if self.encoder_kind != "glove":
+            return self.encoder
         from automatic_text_to_gesture.core import TOKEN, load_glove
         needed = {w for r in rules for w in TOKEN.findall(r.phrase.lower())} | set(TOKEN.findall(text.lower()))
         missing = needed - self.vectors.keys()
@@ -105,7 +123,8 @@ class PreparedDemo:
         gestures = {r.gesture_id for r in rules}
         metrics = {k: self.manifest["metrics"].get(k) for k in ("bank_gestures", "heldout_top1", "heldout_chance")}
         metrics.update(rule_count=len(rules), distinct_rule_gestures=len(gestures), threshold=threshold, min_similarity=floor)
-        return pm.query_result(slots, algorithm=ALGORITHM, data_label=DATA_LABEL, metrics=metrics,
-                               trace={"input": text, "retrieval_text": text, "seed": seed, "map": "auto"},
+        return pm.query_result(slots, algorithm=self.algorithm, data_label=DATA_LABEL, metrics=metrics,
+                               trace={"input": text, "retrieval_text": text, "seed": seed, "map": "auto",
+                                      "text_encoder": self.encoder_label},
                                joints=pm.ingest().UPPER_BODY,
-                               extra={"threshold": threshold, "rule_count": len(rules)})
+                               extra={"threshold": threshold, "rule_count": len(rules), "text_encoder": self.encoder_label})
