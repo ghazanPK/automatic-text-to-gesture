@@ -388,9 +388,10 @@ export function applyGesturePose(rig,name='idle',t=0){
   for(const side of ['left','right']){
     const sign=side==='left'?1:-1;
     let upper=[sign*.18,-1,.05],lower=[sign*.06,-1,.12];
-    // Open-palm presentation: elbows stay near the body, forearms come forward and slightly apart at
-    // waist-to-chest height, palms turned up (not arms spread to the sides, which reads as a T-pose).
-    if(open){upper=[sign*.3,-.88,.36];lower=[sign*(.45+.1*beat),.12+.05*beat,.88];}
+    // Open-palm presentation: the upper arm hangs close to the torso with the elbow slightly forward, the
+    // forearm comes forward (a little out, a little down) so the wrists sit at waist-to-lower-chest height
+    // about shoulder width apart, palms turned up/inward. Wider or higher targets read as a T-pose.
+    if(open){upper=[sign*.08,-.95,.3];lower=[sign*(.24+.06*beat),-.14+.04*beat,.96];}
     if((point||wave||think)&&side==='right'){
       upper=think?[-.25,-.65,.65]:wave?[-.75,.35,.35]:[-.65,-.12,.8];
       lower=think?[.12,.9,.2]:wave?[-.15,1,.15+.3*beat]:[-.7,.05+.08*beat,.8];
@@ -852,7 +853,8 @@ export function createStage(container, options={}) {
       a.legs.forEach((l,i)=>l.rotation.x=a.walking?.3*Math.sin(t*8+i*Math.PI):0);
       a.arms[0].rotation.set(0,0,.08);a.arms[1].rotation.set(0,0,-.08);
       if(/point|touch|reach/.test(a.gesture)){a.arms[1].rotation.x=-1.2;a.arms[1].rotation.z=-.35;}
-      else if(/welcome|open|explain/.test(a.gesture)){a.arms[0].rotation.z=.3;a.arms[1].rotation.z=-.3;a.arms.forEach(l=>l.rotation.x=-.75);}
+      // Open palm: straight stick arms swing forward, hands in front of the body at waist height, shoulder width apart.
+      else if(/welcome|open|explain|offer|reassure|present/.test(a.gesture)){a.arms[0].rotation.z=-.05;a.arms[1].rotation.z=.05;a.arms.forEach(l=>l.rotation.x=-.9);}
       else if(/think/.test(a.gesture))a.arms[1].rotation.x=-2.2;
       else if(/wave|beat/.test(a.gesture))a.arms[1].rotation.z=-1.6+.25*Math.sin(t*5);
       a.mouth.scale.y=clamp(f.jawOpen)*.8+.15;

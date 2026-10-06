@@ -1,6 +1,6 @@
-import {createStage} from './avatar.js?v=20261006-paper4';
-import {Speech} from './speech.js?v=20261006-paper4';
-import {MotionSequence,loadGestureLibrary} from './gesture-library.js?v=20261006-paper4';
+import {createStage} from './avatar.js?v=20261006-paper5';
+import {Speech} from './speech.js?v=20261006-paper5';
+import {MotionSequence,loadGestureLibrary} from './gesture-library.js?v=20261006-paper5';
 const stage=createStage(document.querySelector('#stage'));stage.camera.position.set(0,1.5,3.3);stage.camera.lookAt(0,.95,0);
 const speech=new Speech(stage);
 const $=s=>document.querySelector(s);

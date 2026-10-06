@@ -57,10 +57,15 @@ IDLE_ID = "idle"
 MIN_SIMILARITY = 0.2           # RIDGE index default (its rule threshold and fallback are separate)
 SBERT_MIN_SIMILARITY = 0.35    # legacy value, kept for callers that pass it explicitly
 # Wild/Multilingual pick the best rule for every chunk (paper); the idle threshold is only the papers' optional
-# low-similarity fallback. TF-IDF: idle only when no rule shares a content word (cosine 0). Sentence-BERT: idle
-# below a low cosine that unrelated or non-English text stays under while ordinary conversational lines pass.
+# low-similarity fallback. TF-IDF: idle only when no rule shares a content word (cosine 0). Sentence-BERT: the
+# word-piece vocabulary check idles out-of-vocabulary text (gibberish, untranslated non-Latin script); the cosine
+# floor only idles a chunk that matches no rule at all. A higher floor does not separate the two: with MiniLM over
+# the processed and public BEAT banks, ordinary English answer chunks score from 0.14 (physician answer "be
+# confirmed directly with the clinical", audit 2026-10-06) while keyboard-mash and nonsense words score 0.16-0.24.
 POSE_TFIDF_FLOOR = 1e-6
-POSE_SBERT_FLOOR = 0.15  # MiniLM: default application lines score 0.16-0.43 against BEAT rules, gibberish 0.10-0.12
+POSE_SBERT_FLOOR = 0.05
+# Indexes store the default floor of the code that prepared them; these earlier defaults follow POSE_SBERT_FLOOR.
+LEGACY_POSE_SBERT_FLOORS = (0.15,)
 AUTOMATIC_PHRASE_WORDS = 5
 AUTOMATIC_PERCENTILE = 80.0
 POSE_CHUNK_WORDS = 6
@@ -1575,7 +1580,7 @@ def _usable_encoders(info, index_sha):
         encoder = TfidfText.fit(texts, note=note)
         out["rules"] = [dict(r, text_embedding=e.tolist()) for r, e in zip(info["rules"], encoder.encode(texts))]
         out["text_encoder"] = encoder.to_dict()
-        if info.get("min_similarity") == POSE_SBERT_FLOOR:
+        if info.get("min_similarity") in (POSE_SBERT_FLOOR, *LEGACY_POSE_SBERT_FLOORS):
             out["min_similarity"] = POSE_TFIDF_FLOOR
     elif info["mode"] == "ridge":
         rules = info.get("strong_rules") or []
@@ -1612,6 +1617,9 @@ def query(text, params, mode, artifact_dir):
         raise ValueError("Prepared BEAT bank is missing or has changed; run prepare again")
     by_id = {str(c["id"]): c for c in bank["clips"]}
     default_floor = info.get("min_similarity", MIN_SIMILARITY)
+    if mode in {"wild", "multilingual"} and (info.get("text_encoder") or {}).get("kind") == "sbert" \
+            and default_floor in LEGACY_POSE_SBERT_FLOORS:
+        default_floor = POSE_SBERT_FLOOR  # prepared before 2026-10-06 paper5: no refit needed for the new default
     requested = params.get("min_similarity")
     if isinstance(requested, list):
         requested = requested[0] if requested else None
